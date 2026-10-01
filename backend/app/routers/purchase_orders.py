@@ -1,0 +1,355 @@
+import datetime
+import openpyxl
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy.orm import Session
+from typing import List
+from .. import models, schemas, reporting
+from ..database import get_db
+from ..security import current_user
+
+router = APIRouter(prefix="/purchase-orders", tags=["Purchase Orders"])
+
+
+@router.post("/", response_model=schemas.PurchaseOrderOut)
+def create_purchase_order(po: schemas.PurchaseOrderCreate, db: Session = Depends(get_db)):
+    vendor = db.query(models.Vendor).filter(models.Vendor.id == po.vendor_id).first()
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+
+    existing = db.query(models.PurchaseOrder).filter(models.PurchaseOrder.po_number == po.po_number).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="PO number already exists")
+
+    db_po = models.PurchaseOrder(
+        po_number=po.po_number,
+        vendor_id=po.vendor_id,
+        notes=po.notes,
+        status=models.POStatus.approved,
+    )
+    db.add(db_po)
+    db.flush()  # get db_po.id before commit
+
+    for line in po.lines:
+        item = db.query(models.Item).filter(models.Item.id == line.item_id).first()
+        if not item:
+            raise HTTPException(status_code=404, detail=f"Item {line.item_id} not found")
+        db_line = models.PurchaseOrderLine(
+            purchase_order_id=db_po.id,
+            item_id=line.item_id,
+            quantity=line.quantity,
+            rate=line.rate,
+        )
+        db.add(db_line)
+
+    db.commit()
+    db.refresh(db_po)
+    return db_po
+
+
+@router.get("/", response_model=List[schemas.PurchaseOrderOut])
+def list_purchase_orders(db: Session = Depends(get_db)):
+    return db.query(models.PurchaseOrder).all()
+
+
+@router.get("/report")
+def purchase_order_report(request: Request, start_date: datetime.date = None, end_date: datetime.date = None,
+                          db: Session = Depends(get_db)):
+    """
+    Excel report of purchase orders raised in the date range (inclusive, Pakistan
+    time). Three sheets:
+      - Purchase Orders: one row per PO (items described, amount, how much was paid
+        and how), a total after each day and a gross total.
+      - Payments: every payment made against those POs (one row per payment split,
+        with method/cheque/bank details), totalled by payment day, plus a gross total.
+      - PO Line Items: the numeric item lines (qty, rate, amount) with daily/gross totals.
+    Cancelled POs are left out (the count is noted at the bottom of the first sheet).
+    """
+    lo, hi = reporting.range_bounds(start_date, end_date)
+    all_pos = db.query(models.PurchaseOrder).filter(
+        models.PurchaseOrder.order_date >= lo, models.PurchaseOrder.order_date < hi,
+    ).order_by(models.PurchaseOrder.order_date, models.PurchaseOrder.id).all()
+    cancelled = [p for p in all_pos if p.status == models.POStatus.cancelled]
+    pos = [p for p in all_pos if p.status != models.POStatus.cancelled]
+
+    po_ids = [p.id for p in pos]
+    payments_by_po = {}
+    if po_ids:
+        for pay in db.query(models.VendorLedgerEntry).filter(
+            models.VendorLedgerEntry.ref_type == "PO_PAYMENT", models.VendorLedgerEntry.ref_id.in_(po_ids),
+        ).order_by(models.VendorLedgerEntry.entry_date, models.VendorLedgerEntry.id).all():
+            payments_by_po.setdefault(pay.ref_id, []).append(pay)
+
+    def po_total(p):
+        return sum(l.quantity * l.rate for l in p.lines)
+
+    def pay_desc(pay):
+        return reporting.describe_payment(pay, pay.vendor_bank_account)
+
+    user = current_user(request)
+    sub = [f"Period: {reporting.fmt_day(start_date)} to {reporting.fmt_day(end_date)}  (by PO date)",
+           f"Generated {reporting.fmt_day(reporting.pkt_today())} by {user.full_name}"]
+    wb = openpyxl.Workbook()
+
+    # ------------------------------------------------ sheet 1: purchase orders
+    cols = ["PO Date", "PO No.", "Vendor", "Status", "Items / Description", "PO Amount (Rs.)",
+            "Payment Status", "Amount Paid (Rs.)", "Balance Due (Rs.)", "Payment Details", "Notes"]
+    ws, r = reporting.new_sheet(wb, "Purchase Orders", "Riwayat Oils and Fats — Purchase Order Report", sub, cols,
+                                [13, 20, 24, 16, 46, 17, 13, 17, 17, 52, 28])
+    n = len(cols)
+    by_day = {}
+    for p in pos:
+        by_day.setdefault(reporting.pkt_date(p.order_date), []).append(p)
+    g_amt = g_paid = g_bal = 0.0
+    if not pos:
+        ws.cell(row=r, column=1, value="No purchase orders were raised in this period.")
+        r += 1
+    for day in sorted(by_day):
+        d_amt = d_paid = d_bal = 0.0
+        for p in by_day[day]:
+            amt = po_total(p)
+            pays = payments_by_po.get(p.id, [])
+            paid = sum(x.amount for x in pays)
+            bal = amt - paid
+            items_text = "\n".join(
+                f"{i}) {l.item.name} — {l.quantity:g} {l.item.uom.symbol} × Rs. {l.rate:,.2f} = Rs. {l.quantity * l.rate:,.2f}"
+                for i, l in enumerate(p.lines, start=1))
+            pay_text = "\n".join(
+                f"{reporting.fmt_day(reporting.pkt_date(x.entry_date))} — Rs. {x.amount:,.2f} — {pay_desc(x)}" for x in pays) or "No payment recorded"
+            reporting.write_row(ws, r, [
+                day, p.po_number, p.vendor.name, p.status.value.replace("_", " ").title(), items_text, amt,
+                p.payment_status.value.title(), paid, bal, pay_text, p.notes or "",
+            ], money_cols=(6, 8, 9), wrap_cols=(3, 5, 10, 11))
+            ws.cell(row=r, column=1).number_format = "dd mmm yyyy"
+            d_amt, d_paid, d_bal = d_amt + amt, d_paid + paid, d_bal + bal
+            r += 1
+        cnt = len(by_day[day])
+        reporting.write_total_row(ws, r, f"Total for {reporting.fmt_day(day)}  ({cnt} PO{'s' if cnt != 1 else ''})", 1,
+                                  {6: d_amt, 8: d_paid, 9: d_bal}, n, reporting.DAY_FILL)
+        g_amt, g_paid, g_bal = g_amt + d_amt, g_paid + d_paid, g_bal + d_bal
+        r += 2
+    reporting.write_total_row(ws, r, f"GROSS TOTAL  ({len(pos)} PO{'s' if len(pos) != 1 else ''}, {len(by_day)} day{'s' if len(by_day) != 1 else ''})", 1,
+                              {6: g_amt, 8: g_paid, 9: g_bal}, n, reporting.GROSS_FILL, border=reporting.TOP_DOUBLE)
+    if cancelled:
+        ws.cell(row=r + 2, column=1, value=f"Note: {len(cancelled)} cancelled PO(s) in this period are not included: "
+                                            + ", ".join(p.po_number for p in cancelled)).font = reporting.Font(italic=True, color="777777")
+
+    # ------------------------------------------------ sheet 2: payments
+    cols2 = ["Payment Date", "PO No.", "PO Date", "Vendor", "Payment Method", "Payment Details", "Amount Paid (Rs.)"]
+    ws2, r = reporting.new_sheet(wb, "Payments", "Riwayat Oils and Fats — Purchase Order Payments", sub[:1] + [
+        "Every payment made against the purchase orders above, grouped by the day the payment was made"] + sub[1:],
+        cols2, [14, 20, 13, 24, 16, 60, 18])
+    pay_rows = [(x, p) for p in pos for x in payments_by_po.get(p.id, [])]
+    pay_rows.sort(key=lambda t: (t[0].entry_date, t[0].id))
+    pdays = {}
+    for x, p in pay_rows:
+        pdays.setdefault(reporting.pkt_date(x.entry_date), []).append((x, p))
+    g = 0.0
+    if not pay_rows:
+        ws2.cell(row=r, column=1, value="No payments recorded against these purchase orders.")
+        r += 1
+    for day in sorted(pdays):
+        d = 0.0
+        for x, p in pdays[day]:
+            reporting.write_row(ws2, r, [
+                day, p.po_number, reporting.pkt_date(p.order_date), p.vendor.name,
+                getattr(x.payment_method, "value", "—").title() if x.payment_method else "—", pay_desc(x), x.amount,
+            ], money_cols=(7,), wrap_cols=(6,))
+            ws2.cell(row=r, column=1).number_format = "dd mmm yyyy"
+            ws2.cell(row=r, column=3).number_format = "dd mmm yyyy"
+            d += x.amount
+            r += 1
+        reporting.write_total_row(ws2, r, f"Total paid on {reporting.fmt_day(day)}  ({len(pdays[day])} payment{'s' if len(pdays[day]) != 1 else ''})",
+                                  1, {7: d}, len(cols2), reporting.DAY_FILL)
+        g += d
+        r += 2
+    reporting.write_total_row(ws2, r, f"GROSS TOTAL PAID  ({len(pay_rows)} payment{'s' if len(pay_rows) != 1 else ''})", 1,
+                              {7: g}, len(cols2), reporting.GROSS_FILL, border=reporting.TOP_DOUBLE)
+
+    # ------------------------------------------------ sheet 3: line items
+    cols3 = ["PO Date", "PO No.", "Vendor", "Item Code", "Item", "Quantity", "Unit", "Rate (Rs.)", "Amount (Rs.)", "Received Qty"]
+    ws3, r = reporting.new_sheet(wb, "PO Line Items", "Riwayat Oils and Fats — Purchase Order Line Items", sub, cols3,
+                                 [13, 20, 24, 12, 30, 12, 8, 14, 17, 13])
+    g = 0.0
+    for day in sorted(by_day):
+        d = 0.0
+        for p in by_day[day]:
+            for l in p.lines:
+                reporting.write_row(ws3, r, [day, p.po_number, p.vendor.name, l.item.code, l.item.name, l.quantity,
+                                             l.item.uom.symbol, l.rate, l.quantity * l.rate, l.received_quantity or 0.0],
+                                    money_cols=(8, 9), qty_cols=(6, 10))
+                ws3.cell(row=r, column=1).number_format = "dd mmm yyyy"
+                d += l.quantity * l.rate
+                r += 1
+        reporting.write_total_row(ws3, r, f"Total for {reporting.fmt_day(day)}", 1, {9: d}, len(cols3), reporting.DAY_FILL)
+        g += d
+        r += 2
+    reporting.write_total_row(ws3, r, "GROSS TOTAL", 1, {9: g}, len(cols3), reporting.GROSS_FILL, border=reporting.TOP_DOUBLE)
+
+    return reporting.workbook_response(wb, f"purchase_orders_{start_date}_to_{end_date}.xlsx")
+
+
+@router.get("/{po_id}", response_model=schemas.PurchaseOrderOut)
+def get_purchase_order(po_id: int, db: Session = Depends(get_db)):
+    po = db.query(models.PurchaseOrder).filter(models.PurchaseOrder.id == po_id).first()
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    return po
+
+
+@router.put("/{po_id}", response_model=schemas.PurchaseOrderOut)
+def update_purchase_order(po_id: int, update: schemas.PurchaseOrderUpdate, db: Session = Depends(get_db)):
+    po = db.query(models.PurchaseOrder).filter(models.PurchaseOrder.id == po_id).first()
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+
+    if any(line.received_quantity > 0 for line in po.lines):
+        raise HTTPException(
+            status_code=400,
+            detail="This PO already has goods received against it and can no longer be edited. "
+                   "You can still add a new PO for any correction needed.",
+        )
+
+    data = update.dict(exclude_unset=True)
+    lines = data.pop("lines", None)
+
+    if "vendor_id" in data:
+        vendor = db.query(models.Vendor).filter(models.Vendor.id == data["vendor_id"]).first()
+        if not vendor:
+            raise HTTPException(status_code=404, detail="Vendor not found")
+
+    for field, value in data.items():
+        setattr(po, field, value)
+
+    if lines is not None:
+        db.query(models.PurchaseOrderLine).filter(models.PurchaseOrderLine.purchase_order_id == po.id).delete()
+        for line in lines:
+            item = db.query(models.Item).filter(models.Item.id == line.item_id).first()
+            if not item:
+                raise HTTPException(status_code=404, detail=f"Item {line.item_id} not found")
+            db.add(models.PurchaseOrderLine(
+                purchase_order_id=po.id, item_id=line.item_id, quantity=line.quantity, rate=line.rate,
+            ))
+
+    db.commit()
+    db.refresh(po)
+    return po
+
+
+@router.delete("/{po_id}")
+def delete_purchase_order(po_id: int, db: Session = Depends(get_db)):
+    po = db.query(models.PurchaseOrder).filter(models.PurchaseOrder.id == po_id).first()
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+
+    if any(line.received_quantity > 0 for line in po.lines):
+        raise HTTPException(
+            status_code=400,
+            detail="This PO already has goods received against it and can't be deleted, since stock and "
+                   "vendor ledger entries depend on it. Set its status to cancelled instead if it's no longer needed.",
+        )
+
+    db.delete(po)
+    db.commit()
+    return {"message": "Purchase order deleted", "po_id": po_id}
+
+
+@router.patch("/{po_id}/cancel", response_model=schemas.PurchaseOrderOut)
+def cancel_purchase_order(po_id: int, db: Session = Depends(get_db)):
+    """Use this instead of delete once a PO has receipts against it — keeps history, just marks it closed."""
+    po = db.query(models.PurchaseOrder).filter(models.PurchaseOrder.id == po_id).first()
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    po.status = models.POStatus.cancelled
+    db.commit()
+    db.refresh(po)
+    return po
+
+
+def _validate_split(split: schemas.PaymentSplitLine, vendor_id: int, db: Session):
+    if split.amount <= 0:
+        raise HTTPException(status_code=400, detail="Each payment split must be greater than zero")
+    if split.payment_method == models.PaymentMethod.cheque:
+        if not split.cheque_number or not split.cheque_bank:
+            raise HTTPException(status_code=400, detail="Cheque payments need a cheque number and bank")
+    elif split.payment_method == models.PaymentMethod.online:
+        if split.vendor_bank_account_id:
+            account = db.query(models.VendorBankAccount).filter(
+                models.VendorBankAccount.id == split.vendor_bank_account_id,
+                models.VendorBankAccount.vendor_id == vendor_id,
+            ).first()
+            if not account:
+                raise HTTPException(status_code=400, detail="Selected vendor bank account not found")
+        elif not split.other_party_name or not split.other_party_bank:
+            raise HTTPException(status_code=400, detail="Online transfers need the other party's name and bank, or a saved vendor account")
+
+
+def _validate_splits_total(update: schemas.PaymentStatusUpdate, total_owed: float, vendor_id: int, db: Session):
+    if update.payment_status != models.PaymentStatus.paid:
+        return
+    if not update.splits:
+        raise HTTPException(status_code=400, detail="At least one payment split is required when marking as paid")
+    for split in update.splits:
+        _validate_split(split, vendor_id, db)
+    splits_total = sum(s.amount for s in update.splits)
+    if abs(splits_total - total_owed) > 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Payment splits add up to Rs. {splits_total:,.2f}, but the amount owed is Rs. {total_owed:,.2f}",
+        )
+
+
+@router.patch("/{po_id}/payment-status", response_model=schemas.PurchaseOrderOut)
+def update_po_payment_status(po_id: int, update: schemas.PaymentStatusUpdate, db: Session = Depends(get_db)):
+    """
+    Marks a PO paid or unpaid. Marking paid posts one credit to the vendor's
+    ledger per payment split (cash, a cheque, a specific bank account, etc.) —
+    together they must add up to the PO's full value. Marking unpaid again
+    reverses every one of those entries, so toggling back and forth never
+    leaves stray records behind.
+    """
+    po = db.query(models.PurchaseOrder).filter(models.PurchaseOrder.id == po_id).first()
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+
+    po_total = sum(l.quantity * l.rate for l in po.lines)
+    _validate_splits_total(update, po_total, po.vendor_id, db)
+
+    existing_payments = db.query(models.VendorLedgerEntry).filter(
+        models.VendorLedgerEntry.ref_type == "PO_PAYMENT",
+        models.VendorLedgerEntry.ref_id == po.id,
+    ).all()
+
+    if update.payment_status == models.PaymentStatus.paid:
+        if existing_payments:
+            raise HTTPException(status_code=400, detail="This PO is already marked paid")
+        payment_date = update.payment_date or datetime.datetime.utcnow()
+        split_count = len(update.splits)
+        for i, split in enumerate(update.splits, start=1):
+            note = update.notes or f"Payment for {po.po_number}"
+            if split_count > 1:
+                note += f" (split {i}/{split_count})"
+            db.add(models.VendorLedgerEntry(
+                vendor_id=po.vendor_id,
+                direction=models.LedgerDirection.credit,
+                amount=split.amount,
+                ref_type="PO_PAYMENT",
+                ref_id=po.id,
+                entry_date=payment_date,
+                notes=note,
+                payment_method=split.payment_method,
+                cheque_number=split.cheque_number,
+                cheque_bank=split.cheque_bank,
+                our_bank=split.our_bank,
+                other_party_name=split.other_party_name,
+                other_party_bank=split.other_party_bank,
+                vendor_bank_account_id=split.vendor_bank_account_id,
+            ))
+        po.payment_status = models.PaymentStatus.paid
+    else:
+        for entry in existing_payments:
+            db.delete(entry)
+        po.payment_status = models.PaymentStatus.unpaid
+
+    db.commit()
+    db.refresh(po)
+    return po

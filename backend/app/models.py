@@ -704,6 +704,8 @@ class Expense(Base):
     bill_photo_url = Column(String, nullable=True)
     bill_photo_drive_file_id = Column(String, nullable=True)
 
+    payroll_run_id = Column(Integer, nullable=True)   # set on the salary expenses a finalized payroll run posts
+
 
 # ---------- HR & Payroll (Phase 7) ----------
 

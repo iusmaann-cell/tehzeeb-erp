@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { Card, SectionTitle, Button, Input, Table, Badge, formatPKR, FormPanel, confirmDialog } from "../components/ui";
+import { useAuth } from "../auth";
+import { Card, SectionTitle, Button, Input, Table, Badge, formatPKR, FormPanel, RowActions, confirmDialog, notify } from "../components/ui";
 
 function firstOfMonthStr() {
   const d = new Date();
@@ -23,6 +24,11 @@ export default function Payroll() {
   const [error, setError] = useState("");
   const [selectedRun, setSelectedRun] = useState(null);
   const [editedLines, setEditedLines] = useState({});
+  const { canDo } = useAuth();
+  const canManageFinalized = canDo("manage_finalized_payroll");
+  const [editingId, setEditingId] = useState(null);   // run being edited (null = creating)
+  const [notes, setNotes] = useState("");
+  const [recompute, setRecompute] = useState(false);
 
   async function load() {
     const [runData, empData] = await Promise.all([api.getPayrollRuns(), api.getEmployees()]);
@@ -37,17 +43,62 @@ export default function Payroll() {
     e.preventDefault();
     setError("");
     try {
-      const run = await api.createPayrollRun({
+      const body = {
         run_number: runNumber,
         period_start: `${periodStart}T00:00:00`,
         period_end: `${periodEnd}T23:59:59`,
-      });
-      setRunNumber("");
+        notes: notes || null,
+      };
+      const run = editingId
+        ? await api.updatePayrollRun(editingId, { ...body, recompute })
+        : await api.createPayrollRun(body);
+      setRunNumber(""); setNotes(""); setEditingId(null); setRecompute(false);
       setShowForm(false);
       load();
       viewRun(run.id);
     } catch (err) {
       setError(err.message);
+    }
+  }
+
+  function startCreate() {
+    setEditingId(null); setRunNumber(""); setNotes(""); setRecompute(false); setError("");
+    setPeriodStart(firstOfMonthStr()); setPeriodEnd(todayStr());
+    setShowForm(true);
+  }
+
+  function openEditForm(run) {
+    setEditingId(run.id); setRunNumber(run.run_number); setNotes(run.notes || ""); setRecompute(false); setError("");
+    setPeriodStart(run.period_start.slice(0, 10)); setPeriodEnd(run.period_end.slice(0, 10));
+    setShowForm(true);
+  }
+
+  // Finalized runs have to be reopened (their salary expenses are taken back out) before editing.
+  async function startEdit(run) {
+    if (run.status === "finalized") {
+      if (!(await confirmDialog(
+        `${run.run_number} is finalized. To edit it, it will go back to draft and the salary expenses it posted will be removed until you finalize it again.`,
+        { title: "Reopen this payroll run?", confirmLabel: "Yes, reopen", danger: false },
+      ))) return;
+      try { run = await api.reopenPayrollRun(run.id); } catch (err) { notify(err.message, "error"); return; }
+      load();
+      if (selectedRun?.id === run.id) viewRun(run.id);
+    }
+    openEditForm(run);
+  }
+
+  async function handleDelete(run) {
+    const finalized = run.status === "finalized";
+    const msg = finalized
+      ? `Delete ${run.run_number}? It is finalized, so the salary expenses it posted will be removed from Expenses and reports. This can't be undone.`
+      : `Delete ${run.run_number} and all its payslips? This can't be undone.`;
+    if (!(await confirmDialog(msg, { title: "Delete payroll run?" }))) return;
+    try {
+      await api.deletePayrollRun(run.id);
+      if (selectedRun?.id === run.id) setSelectedRun(null);
+      load();
+    } catch (err) {
+      notify(err.message, "error");
     }
   }
 
@@ -75,6 +126,38 @@ export default function Payroll() {
 
   const totalNetPay = selectedRun ? selectedRun.lines.reduce((s, l) => s + l.net_pay, 0) : 0;
 
+  const formPanel = showForm && (
+    <FormPanel wide title={editingId ? "Edit Payroll Run" : "New Payroll Run"} onClose={() => setShowForm(false)}>
+      {employees.length === 0 ? (
+        <div className="text-text-muted text-sm">Add employees first, and mark some attendance for the period.</div>
+      ) : (
+        <form onSubmit={handleCreate} className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Input label="Run number" placeholder="PAYROLL-2026-08" required value={runNumber} onChange={(e) => setRunNumber(e.target.value)} />
+            <Input label="Notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} />
+            <Input label="Period start" type="date" value={periodStart} onChange={(e) => setPeriodStart(e.target.value)} />
+            <Input label="Period end" type="date" value={periodEnd} onChange={(e) => setPeriodEnd(e.target.value)} />
+          </div>
+          {editingId && (
+            <label className="flex items-center gap-3 text-sm font-semibold text-forest cursor-pointer min-h-[44px]">
+              <input type="checkbox" className="w-5 h-5" checked={recompute} onChange={(e) => setRecompute(e.target.checked)} />
+              Recalculate everyone's pay from attendance again
+            </label>
+          )}
+          <div className="text-xs text-text-muted">
+            {editingId
+              ? "Changing the period recalculates every payslip from attendance. Allowances and deductions you already typed are kept."
+              : "Pay is computed automatically from attendance marked in this period — salaried staff get a per-day deduction for unpaid absence, daily-wage staff are paid for days actually worked. You can adjust allowances/deductions before finalizing."}
+          </div>
+          <div className="flex items-center gap-3">
+            <Button type="submit">{editingId ? "Save Changes" : "Compute Payroll"}</Button>
+            {error && <span className="text-red text-sm">{error}</span>}
+          </div>
+        </form>
+      )}
+    </FormPanel>
+  );
+
   if (selectedRun) {
     return (
       <div>
@@ -83,13 +166,22 @@ export default function Payroll() {
           title={`Payroll: ${selectedRun.run_number}`}
           action={<Button variant="secondary" onClick={() => setSelectedRun(null)}>&larr; Back to runs</Button>}
         />
+        {formPanel}
         <Card className="mb-4">
           <div className="flex items-center justify-between">
             <div className="text-sm text-text-muted">
               {new Date(selectedRun.period_start).toLocaleDateString()} &ndash; {new Date(selectedRun.period_end).toLocaleDateString()}
               {" · "}<Badge tone={STATUS_TONES[selectedRun.status]}>{selectedRun.status}</Badge>
             </div>
-            {selectedRun.status === "draft" && <Button onClick={handleFinalize}>Finalize Payroll</Button>}
+            <div className="flex flex-wrap items-center gap-2 justify-end">
+              {(selectedRun.status === "draft" || canManageFinalized) && (
+                <Button variant="secondary" onClick={() => startEdit(selectedRun)}>Edit</Button>
+              )}
+              {(selectedRun.status === "draft" || canManageFinalized) && (
+                <Button variant="danger" onClick={() => handleDelete(selectedRun)}>Delete</Button>
+              )}
+              {selectedRun.status === "draft" && <Button onClick={handleFinalize}>Finalize Payroll</Button>}
+            </div>
           </div>
         </Card>
 
@@ -160,33 +252,10 @@ export default function Payroll() {
       <SectionTitle
         eyebrow="HR & Payroll"
         title="Payroll Runs"
-        action={<Button onClick={() => setShowForm((s) => !s)}>+ New Payroll Run</Button>}
+        action={<Button onClick={startCreate}>+ New Payroll Run</Button>}
       />
 
-      {showForm && (
-        <FormPanel wide title="New Payroll Run" onClose={() => setShowForm(false)}>
-          {employees.length === 0 ? (
-            <div className="text-text-muted text-sm">Add employees first, and mark some attendance for the period.</div>
-          ) : (
-            <form onSubmit={handleCreate} className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <Input label="Run number" placeholder="PAYROLL-2026-08" required value={runNumber} onChange={(e) => setRunNumber(e.target.value)} />
-                <Input label="Period start" type="date" value={periodStart} onChange={(e) => setPeriodStart(e.target.value)} />
-                <Input label="Period end" type="date" value={periodEnd} onChange={(e) => setPeriodEnd(e.target.value)} />
-              </div>
-              <div className="text-xs text-text-muted">
-                Pay is computed automatically from attendance marked in this period — salaried staff get a per-day
-                deduction for unpaid absence, daily-wage staff are paid for days actually worked. You can adjust
-                allowances/deductions before finalizing.
-              </div>
-              <div className="flex items-center gap-3">
-                <Button type="submit">Compute Payroll</Button>
-                {error && <span className="text-red text-sm">{error}</span>}
-              </div>
-            </form>
-          )}
-        </FormPanel>
-      )}
+      {formPanel}
 
       <Card>
         <Table
@@ -196,7 +265,17 @@ export default function Payroll() {
             { key: "period", label: "Period", render: (row) => `${new Date(row.period_start).toLocaleDateString()} – ${new Date(row.period_end).toLocaleDateString()}` },
             { key: "status", label: "Status", render: (row) => <Badge tone={STATUS_TONES[row.status]}>{row.status}</Badge> },
             { key: "total", label: "Total net pay", mono: true, render: (row) => `Rs. ${formatPKR(row.lines.reduce((s, l) => s + l.net_pay, 0))}` },
-            { key: "view", label: "", render: (row) => <button type="button" className="text-xs text-amber-soft hover:underline" onClick={() => viewRun(row.id)}>View</button> },
+            {
+              key: "view", label: "",
+              render: (row) => (
+                <div className="flex items-center gap-3">
+                  <button type="button" className="text-xs text-amber-soft hover:underline" onClick={() => viewRun(row.id)}>View</button>
+                  {(row.status === "draft" || canManageFinalized) && (
+                    <RowActions onEdit={() => startEdit(row)} onDelete={() => handleDelete(row)} deleteLabel="Delete" deleteConfirm="" skipConfirm />
+                  )}
+                </div>
+              ),
+            },
           ]}
           rows={runs}
         />

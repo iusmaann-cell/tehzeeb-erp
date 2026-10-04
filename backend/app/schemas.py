@@ -947,6 +947,16 @@ class PayrollRunCreate(BaseModel):
     notes: Optional[str] = None
 
 
+class PayrollRunUpdate(BaseModel):
+    """Edit a draft run's details. If the period changes (or `recompute` is true) every
+    payslip is recalculated from attendance; allowances/deductions already typed are kept."""
+    run_number: Optional[str] = None
+    period_start: Optional[datetime.datetime] = None
+    period_end: Optional[datetime.datetime] = None
+    notes: Optional[str] = None
+    recompute: bool = False
+
+
 class PayslipLineUpdate(BaseModel):
     allowances: Optional[float] = None
     deductions: Optional[float] = None

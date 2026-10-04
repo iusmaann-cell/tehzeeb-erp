@@ -1,9 +1,10 @@
 import datetime
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from typing import List
 from .. import models, schemas
 from ..database import get_db
+from ..security import user_has_action, current_user
 
 router = APIRouter(prefix="/payroll", tags=["Payroll"])
 
@@ -132,6 +133,7 @@ def finalize_payroll_run(run_id: int, db: Session = Depends(get_db)):
             continue
         db.add(models.Expense(
             category=models.ExpenseCategory.salaries,
+            payroll_run_id=run.id,
             plant=plant_key,
             amount=total,
             description=f"Payroll {run.run_number} ({period_label})",
@@ -141,3 +143,103 @@ def finalize_payroll_run(run_id: int, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(run)
     return run
+
+
+# ---------------------------------------------------------------- edit / reopen / delete
+def _require_finalized_permission(request: Request):
+    if not user_has_action(current_user(request), "manage_finalized_payroll"):
+        raise HTTPException(
+            status_code=403,
+            detail="Your role doesn't include permission to: Reopen or delete finalized payroll runs",
+        )
+
+
+def _posted_expenses(db: Session, run: models.PayrollRun):
+    """The salary expenses this run posted when it was finalized. Runs finalized before the
+    link existed are found by their description ("Payroll <run no.> (…)")."""
+    rows = db.query(models.Expense).filter(
+        models.Expense.category == models.ExpenseCategory.salaries,
+    ).all()
+    prefix = f"Payroll {run.run_number} ("
+    return [e for e in rows if e.payroll_run_id == run.id or (e.payroll_run_id is None and (e.description or "").startswith(prefix))]
+
+
+@router.put("/runs/{run_id}", response_model=schemas.PayrollRunOut)
+def update_payroll_run(run_id: int, update: schemas.PayrollRunUpdate, db: Session = Depends(get_db)):
+    """Edit a draft run: number, period, notes. Changing the period (or asking to recompute)
+    rebuilds each payslip from attendance and adds anyone who became active since."""
+    run = db.query(models.PayrollRun).filter(models.PayrollRun.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Payroll run not found")
+    if run.status == models.PayrollRunStatus.finalized:
+        raise HTTPException(status_code=400, detail="This run is finalized. Reopen it first to edit it.")
+
+    data = update.dict(exclude_unset=True)
+    recompute = data.pop("recompute", False)
+
+    if data.get("run_number") and data["run_number"] != run.run_number:
+        if db.query(models.PayrollRun).filter(models.PayrollRun.run_number == data["run_number"]).first():
+            raise HTTPException(status_code=400, detail="Run number already exists")
+
+    new_start = data.get("period_start", run.period_start)
+    new_end = data.get("period_end", run.period_end)
+    if new_end < new_start:
+        raise HTTPException(status_code=400, detail="Period end can't be before period start")
+    if new_start != run.period_start or new_end != run.period_end:
+        recompute = True
+
+    for field, value in data.items():
+        setattr(run, field, value)
+
+    if recompute:
+        by_emp = {l.employee_id: l for l in run.lines}
+        for emp in db.query(models.Employee).filter(models.Employee.is_active == 1).all():
+            calc = _compute_payslip(db, emp, new_start, new_end)
+            line = by_emp.get(emp.id)
+            if line is None:
+                db.add(models.PayslipLine(payroll_run_id=run.id, employee_id=emp.id, allowances=0.0, deductions=0.0,
+                                          net_pay=calc["basic_pay"] + calc["overtime_pay"], **calc))
+            else:
+                for k, v in calc.items():
+                    setattr(line, k, v)
+                line.net_pay = line.basic_pay + line.overtime_pay + (line.allowances or 0) - (line.deductions or 0)
+
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+@router.patch("/runs/{run_id}/reopen", response_model=schemas.PayrollRunOut)
+def reopen_payroll_run(run_id: int, request: Request, db: Session = Depends(get_db)):
+    """Turns a finalized run back into a draft and removes the salary expenses it posted, so it
+    can be corrected and finalized again (which posts fresh expenses)."""
+    _require_finalized_permission(request)
+    run = db.query(models.PayrollRun).filter(models.PayrollRun.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Payroll run not found")
+    if run.status != models.PayrollRunStatus.finalized:
+        raise HTTPException(status_code=400, detail="This run is already a draft")
+    for e in _posted_expenses(db, run):
+        db.delete(e)
+    run.status = models.PayrollRunStatus.draft
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+@router.delete("/runs/{run_id}")
+def delete_payroll_run(run_id: int, request: Request, db: Session = Depends(get_db)):
+    """Deletes a run and its payslips. A finalized run also needs the 'finalized payroll'
+    permission, and its posted salary expenses are removed too so reports stay correct."""
+    run = db.query(models.PayrollRun).filter(models.PayrollRun.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Payroll run not found")
+    removed = 0
+    if run.status == models.PayrollRunStatus.finalized:
+        _require_finalized_permission(request)
+        for e in _posted_expenses(db, run):
+            db.delete(e)
+            removed += 1
+    db.delete(run)
+    db.commit()
+    return {"message": "Payroll run deleted", "run_id": run_id, "expenses_removed": removed}

@@ -185,7 +185,7 @@ export function IconButton({ icon, label, onClick, tone = "neutral", disabled, t
   );
 }
 
-export function RowActions({ onEdit, onDelete, deleteLabel = "Delete", deleteConfirm = "Are you sure?", deleteDisabledReason }) {
+export function RowActions({ onEdit, onDelete, deleteLabel = "Delete", deleteConfirm = "Are you sure?", deleteDisabledReason, skipConfirm = false }) {
   return (
     <div className="flex items-center gap-2">
       {onEdit && <IconButton icon="edit" label="Edit" onClick={onEdit} />}
@@ -198,7 +198,7 @@ export function RowActions({ onEdit, onDelete, deleteLabel = "Delete", deleteCon
             label={deleteLabel}
             tone="danger"
             onClick={async () => {
-              if (await confirmDialog(deleteConfirm, { title: `${deleteLabel}?`, confirmLabel: `Yes, ${deleteLabel.toLowerCase()}` })) onDelete();
+              if (skipConfirm || await confirmDialog(deleteConfirm, { title: `${deleteLabel}?`, confirmLabel: `Yes, ${deleteLabel.toLowerCase()}` })) onDelete();
             }}
           />
         )

@@ -1,3 +1,4 @@
+import re
 from fastapi import APIRouter, Depends, HTTPException, Form, File, UploadFile
 from sqlalchemy.orm import Session
 from typing import List
@@ -10,13 +11,20 @@ ALLOWED_IMAGE_TYPES = ("image/jpeg", "image/png", "image/webp", "image/heic", "i
 MAX_PHOTO_BYTES = 5 * 1024 * 1024
 
 
+def _batch_item_tag(item) -> str:
+    """Item name in capitals without spaces or symbols: "Vitamin A" -> "VITAMINA"."""
+    tag = re.sub(r"[\W_]+", "", item.name or "", flags=re.UNICODE).upper()
+    return tag or re.sub(r"[\W_]+", "", item.code or "", flags=re.UNICODE).upper() or f"ITEM{item.id}"
+
+
 def _auto_batch_no(db: Session, item_id: int) -> str:
-    """BATCH-<d><mm><yy>-<n>, e.g. BATCH-41026-1 for the 1st batch received on 4 Oct 2026.
-    n is that item's running batch count (every GRN line is one batch), so each item has
-    its own 1, 2, 3 … sequence. Pakistan date. Skips any number already used for the item."""
+    """BATCH-<d><mm><yy>-<ITEMNAME>-<n>, e.g. BATCH-41026-VITAMINA-3 for the 3rd batch of
+    Vitamin A, received on 4 Oct 2026. n is that item's running batch count (every GRN line is
+    one batch). Pakistan date. Skips any number already used for the item."""
     db.flush()   # include this GRN's earlier lines in the count
+    item = db.query(models.Item).filter(models.Item.id == item_id).first()
     today = reporting.pkt_today()
-    stem = f"BATCH-{today.day}{today.month:02d}{today.year % 100:02d}"
+    stem = f"BATCH-{today.day}{today.month:02d}{today.year % 100:02d}-{_batch_item_tag(item)}"
     n = db.query(models.GRNLine).filter(models.GRNLine.item_id == item_id).count() + 1
     used = {r[0] for r in db.query(models.StockLedgerEntry.batch_no).filter(
         models.StockLedgerEntry.item_id == item_id, models.StockLedgerEntry.batch_no.isnot(None)).all()}

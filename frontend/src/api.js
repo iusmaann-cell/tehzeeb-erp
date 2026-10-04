@@ -282,6 +282,9 @@ export const api = {
   createPayrollRun: (data) => request("/payroll/runs/", { method: "POST", body: JSON.stringify(data) }),
   getPayrollRun: (id) => request(`/payroll/runs/${id}`),
   updatePayslipLine: (runId, lineId, data) => request(`/payroll/runs/${runId}/lines/${lineId}`, { method: "PUT", body: JSON.stringify(data) }),
+  updatePayrollRun: (id, data) => request(`/payroll/runs/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  reopenPayrollRun: (id) => request(`/payroll/runs/${id}/reopen`, { method: "PATCH" }),
+  deletePayrollRun: (id) => request(`/payroll/runs/${id}`, { method: "DELETE" }),
   finalizePayrollRun: (id) => request(`/payroll/runs/${id}/finalize`, { method: "PATCH" }),
 
   // BI Dashboards

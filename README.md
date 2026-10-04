@@ -1,4 +1,4 @@
-# Riwayat Oils and Fats ERP — Phase 1-8 + Improvement Phases 1-16: Procurement, Inventory, Production, Toll Processing, Packaging, Sales, Finance, HR & Payroll, BI Dashboards
+# Riwayat Oils and Fats ERP — Phase 1-8 + Improvement Phases 1-17: Procurement, Inventory, Production, Toll Processing, Packaging, Sales, Finance, HR & Payroll, BI Dashboards
 
 ## Important: database migrations
 
@@ -54,10 +54,18 @@ New page: Procurement → **Stock Transfers**. Pick the item, the source and des
 - Transfers can't be edited or deleted (append-only ledger) — record a transfer back to correct a mistake. Each transfer records who made it.
 - **Access:** new permission "Stock Transfers" in Settings → Accounts → Roles. Existing roles don't have it until you tick it (Admins always do). Having it also lets that role read Stock levels, which the form needs.
 
+## Improvement Phase 17 — Edit / delete payroll runs, batch numbers with item name
+
+- **Batch numbers** (Phase 16 rule, refined): `BATCH-<d><mm><yy>-<ITEMNAME>-<n>`, e.g. `BATCH-41026-VITAMINA-3`.
+- **Payroll runs can be edited and deleted.**
+  - *Draft* runs: Edit (run number, period, notes, optional "recalculate from attendance" — changing the period recalculates every payslip and keeps allowances/deductions already typed) and Delete, from the runs list or the run page. Anyone with Payroll edit access.
+  - *Finalized* runs: editing reopens the run to draft (the salary expenses it posted are removed until it is finalized again); deleting also removes those expenses so reports stay correct. These two need the new role permission **"Reopen or delete finalized payroll runs"** (administrators always have it).
+  - Salary expenses posted from now on carry the payroll run's id (`expenses.payroll_run_id`); runs finalized earlier are matched by their description.
+
 ## Improvement Phase 16 — Receiving, batches, freight, advances, PO delete permission
 
 - **Goods Received** now shows each item's name (with code, unit, ordered / remaining quantity) above the quantity box.
-- **Automatic batch numbers**: `BATCH-<d><mm><yy>-<n>` in Pakistan time, where `n` is that item's running batch count — e.g. the first batch of an item on 4 Oct 2026 is `BATCH-41026-1`, the next `BATCH-41026-2`. The box is pre-filled and can be edited; if left blank the server fills it in.
+- **Automatic batch numbers**: `BATCH-<d><mm><yy>-<ITEMNAME>-<n>` in Pakistan time (item name in capitals, no spaces), where `n` is that item's running batch count — e.g. the 3rd batch of Vitamin A on 4 Oct 2026 is `BATCH-41026-VITAMINA-3`. The box is pre-filled and can be edited; if left blank the server fills it in.
 - **Freight charges** (optional) when receiving. Stored on the GRN and on the PO (`freight_charges`), shown on its own line ("Goods Rs. X + Freight Rs. Y"), posted as a separate `GRN_FREIGHT` debit on the vendor's ledger and as its own column in the PO Excel report. Goods value and the GRN bill entry are unchanged.
 - **Advance payment** when creating a PO (cash / cheque / online). Posted as a `PO_ADVANCE` credit on the vendor ledger; "Mark paid" then asks only for the balance (goods + freight − paid). A PO fully covered by its advance is marked paid straight away. If freight is added after a PO was marked paid, it goes back to unpaid for the freight balance.
 - **Deleting a purchase order** now needs the new role permission **"Delete purchase orders"** (Settings → Accounts → roles). Administrators always have it; other roles do not until it is ticked. The delete button is hidden for everyone else, and the server refuses the request too. Deleting a PO also removes its advance/payment postings from the vendor ledger.

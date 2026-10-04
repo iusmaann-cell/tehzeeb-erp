@@ -33,9 +33,10 @@ export default function GRN() {
   const itemById = Object.fromEntries(items.map((it) => [it.id, it]));
   const uomOf = (it) => uoms.find((u) => u.id === it?.uom_id)?.symbol || "";
 
-  // Batch numbers are generated as BATCH-<d><mm><yy>-<n>, e.g. BATCH-41026-1 = the first batch of
-  // that item on 4 Oct 2026. n counts every batch already received for the item. The server uses
-  // the same rule, so a blank box is filled in there too.
+  // Batch numbers are generated as BATCH-<d><mm><yy>-<ITEMNAME>-<n>, e.g. BATCH-41026-VITAMINA-3 =
+  // the 3rd batch of Vitamin A on 4 Oct 2026. n counts every batch already received for the item.
+  // The server uses the same rule, so a blank box is filled in there too.
+  const itemTag = (it) => (it?.name || "").toUpperCase().replace(/[^\p{L}\p{N}]/gu, "") || (it?.code || "").toUpperCase().replace(/[^\p{L}\p{N}]/gu, "") || `ITEM${it?.id}`;
   function autoBatchNos(lines, grnList = grns) {
     const [y, m, d] = pktToday().split("-");
     const stem = `BATCH-${Number(d)}${m}${y.slice(2)}`;
@@ -44,7 +45,7 @@ export default function GRN() {
     const seen = {};
     return lines.map((l) => {
       seen[l.item_id] = (seen[l.item_id] || 0) + 1;
-      return `${stem}-${(base[l.item_id] || 0) + seen[l.item_id]}`;
+      return `${stem}-${itemTag(itemById[l.item_id])}-${(base[l.item_id] || 0) + seen[l.item_id]}`;
     });
   }
 

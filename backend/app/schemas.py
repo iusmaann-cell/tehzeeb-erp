@@ -193,11 +193,30 @@ class POLineOut(POLineBase):
         from_attributes = True
 
 
+class PaymentSplitLine(BaseModel):
+    """One slice of a (possibly split) payment — e.g. part cash, part a specific
+    bank transfer. The amounts across all splits for one payment must add up to
+    the full amount owed; this isn't a partial-payment feature, just multiple
+    methods/accounts covering one full payment."""
+    amount: float
+    payment_method: PaymentMethod
+    cheque_number: Optional[str] = None
+    cheque_bank: Optional[str] = None
+    our_bank: Optional[str] = None
+    other_party_name: Optional[str] = None
+    other_party_bank: Optional[str] = None
+    vendor_bank_account_id: Optional[int] = None  # vendor (outgoing) payments only —
+    # pick one of the vendor's registered accounts instead of typing the bank freehand
+
+
 class PurchaseOrderCreate(BaseModel):
     po_number: str
     vendor_id: int
     notes: Optional[str] = None
     lines: List[POLineCreate]
+    # Optional advance paid to the vendor when the PO is raised. Reuses the payment-split
+    # shape (method, cheque / bank details); one entry is normal, several are allowed.
+    advance_splits: Optional[List[PaymentSplitLine]] = None
 
 
 class PurchaseOrderUpdate(BaseModel):
@@ -216,24 +235,16 @@ class PurchaseOrderOut(BaseModel):
     payment_status: PaymentStatus
     notes: Optional[str] = None
     lines: List[POLineOut]
+    advance_amount: Optional[float] = 0.0
+    freight_charges: Optional[float] = 0.0
+    # Computed per request (not stored): goods value, goods + freight, money paid so far
+    # (advance + later payments) and what is still owed.
+    goods_total: float = 0.0
+    total_value: float = 0.0
+    amount_paid: float = 0.0
+    balance_due: float = 0.0
     class Config:
         from_attributes = True
-
-
-class PaymentSplitLine(BaseModel):
-    """One slice of a (possibly split) payment — e.g. part cash, part a specific
-    bank transfer. The amounts across all splits for one payment must add up to
-    the full amount owed; this isn't a partial-payment feature, just multiple
-    methods/accounts covering one full payment."""
-    amount: float
-    payment_method: PaymentMethod
-    cheque_number: Optional[str] = None
-    cheque_bank: Optional[str] = None
-    our_bank: Optional[str] = None
-    other_party_name: Optional[str] = None
-    other_party_bank: Optional[str] = None
-    vendor_bank_account_id: Optional[int] = None  # vendor (outgoing) payments only —
-    # pick one of the vendor's registered accounts instead of typing the bank freehand
 
 
 class PaymentStatusUpdate(BaseModel):
@@ -329,7 +340,7 @@ class GRNLineCreate(BaseModel):
     po_line_id: int
     item_id: int
     warehouse_id: int
-    batch_no: str
+    batch_no: Optional[str] = None   # blank → generated as BATCH-<dmmyy>-<n> (n = this item's batch count)
     quantity: float
     rate: float
 
@@ -338,11 +349,13 @@ class GRNCreate(BaseModel):
     grn_number: str
     purchase_order_id: int
     vehicle_no: Optional[str] = None
+    freight_amount: float = 0.0      # optional freight for this delivery; shown apart from goods value
     notes: Optional[str] = None
     lines: List[GRNLineCreate]
 
 
 class GRNLineOut(GRNLineCreate):
+    batch_no: str
     id: int
     class Config:
         from_attributes = True
@@ -354,6 +367,7 @@ class GRNOut(BaseModel):
     purchase_order_id: int
     received_date: datetime.datetime
     vehicle_no: Optional[str] = None
+    freight_amount: Optional[float] = 0.0
     notes: Optional[str] = None
     bill_photo_url: Optional[str] = None
     lines: List[GRNLineOut]

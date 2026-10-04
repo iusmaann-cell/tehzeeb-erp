@@ -1,4 +1,4 @@
-# Riwayat Oils and Fats ERP — Phase 1-8 + Improvement Phases 1-15: Procurement, Inventory, Production, Toll Processing, Packaging, Sales, Finance, HR & Payroll, BI Dashboards
+# Riwayat Oils and Fats ERP — Phase 1-8 + Improvement Phases 1-16: Procurement, Inventory, Production, Toll Processing, Packaging, Sales, Finance, HR & Payroll, BI Dashboards
 
 ## Important: database migrations
 
@@ -53,6 +53,14 @@ New page: Procurement → **Stock Transfers**. Pick the item, the source and des
 - If the destination has a **capacity** set (Warehouses page), a transfer that would overflow it is refused with the remaining room shown.
 - Transfers can't be edited or deleted (append-only ledger) — record a transfer back to correct a mistake. Each transfer records who made it.
 - **Access:** new permission "Stock Transfers" in Settings → Accounts → Roles. Existing roles don't have it until you tick it (Admins always do). Having it also lets that role read Stock levels, which the form needs.
+
+## Improvement Phase 16 — Receiving, batches, freight, advances, PO delete permission
+
+- **Goods Received** now shows each item's name (with code, unit, ordered / remaining quantity) above the quantity box.
+- **Automatic batch numbers**: `BATCH-<d><mm><yy>-<n>` in Pakistan time, where `n` is that item's running batch count — e.g. the first batch of an item on 4 Oct 2026 is `BATCH-41026-1`, the next `BATCH-41026-2`. The box is pre-filled and can be edited; if left blank the server fills it in.
+- **Freight charges** (optional) when receiving. Stored on the GRN and on the PO (`freight_charges`), shown on its own line ("Goods Rs. X + Freight Rs. Y"), posted as a separate `GRN_FREIGHT` debit on the vendor's ledger and as its own column in the PO Excel report. Goods value and the GRN bill entry are unchanged.
+- **Advance payment** when creating a PO (cash / cheque / online). Posted as a `PO_ADVANCE` credit on the vendor ledger; "Mark paid" then asks only for the balance (goods + freight − paid). A PO fully covered by its advance is marked paid straight away. If freight is added after a PO was marked paid, it goes back to unpaid for the freight balance.
+- **Deleting a purchase order** now needs the new role permission **"Delete purchase orders"** (Settings → Accounts → roles). Administrators always have it; other roles do not until it is ticked. The delete button is hidden for everyone else, and the server refuses the request too. Deleting a PO also removes its advance/payment postings from the vendor ledger.
 
 ## Improvement Phase 15 — Full UI redesign ("Riwayat Oils and Fats")
 

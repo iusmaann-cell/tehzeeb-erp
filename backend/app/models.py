@@ -212,6 +212,8 @@ class PurchaseOrder(Base):
     status = Column(Enum(POStatus), default=POStatus.draft)
     payment_status = Column(Enum(PaymentStatus), default=PaymentStatus.unpaid)
     notes = Column(Text, nullable=True)
+    advance_amount = Column(Float, default=0.0)    # paid up-front when the PO was raised (ledger: PO_ADVANCE)
+    freight_charges = Column(Float, default=0.0)   # total freight across this PO's GRNs — kept apart from goods value
 
     vendor = relationship("Vendor")
     lines = relationship("PurchaseOrderLine", back_populates="purchase_order", cascade="all, delete-orphan")
@@ -238,6 +240,7 @@ class GRN(Base):
     purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=False)
     received_date = Column(DateTime, default=datetime.datetime.utcnow)
     vehicle_no = Column(String, nullable=True)
+    freight_amount = Column(Float, default=0.0)               # freight paid/owed for this delivery (ledger: GRN_FREIGHT)
     notes = Column(Text, nullable=True)
     bill_photo_url = Column(String, nullable=True)            # Google Drive view link
     bill_photo_drive_file_id = Column(String, nullable=True)   # for future management (delete/replace)

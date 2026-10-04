@@ -1,13 +1,28 @@
 from fastapi import APIRouter, Depends, HTTPException, Form, File, UploadFile
 from sqlalchemy.orm import Session
 from typing import List
-from .. import models, schemas, file_storage
+from .. import models, schemas, file_storage, reporting
 from ..database import get_db
 
 router = APIRouter(prefix="/grn", tags=["GRN (Goods Received Note)"])
 
 ALLOWED_IMAGE_TYPES = ("image/jpeg", "image/png", "image/webp", "image/heic", "image/heif")
 MAX_PHOTO_BYTES = 5 * 1024 * 1024
+
+
+def _auto_batch_no(db: Session, item_id: int) -> str:
+    """BATCH-<d><mm><yy>-<n>, e.g. BATCH-41026-1 for the 1st batch received on 4 Oct 2026.
+    n is that item's running batch count (every GRN line is one batch), so each item has
+    its own 1, 2, 3 … sequence. Pakistan date. Skips any number already used for the item."""
+    db.flush()   # include this GRN's earlier lines in the count
+    today = reporting.pkt_today()
+    stem = f"BATCH-{today.day}{today.month:02d}{today.year % 100:02d}"
+    n = db.query(models.GRNLine).filter(models.GRNLine.item_id == item_id).count() + 1
+    used = {r[0] for r in db.query(models.StockLedgerEntry.batch_no).filter(
+        models.StockLedgerEntry.item_id == item_id, models.StockLedgerEntry.batch_no.isnot(None)).all()}
+    while f"{stem}-{n}" in used:
+        n += 1
+    return f"{stem}-{n}"
 
 
 @router.post("/", response_model=schemas.GRNOut)
@@ -48,10 +63,15 @@ async def create_grn(
     if existing:
         raise HTTPException(status_code=400, detail="GRN number already exists")
 
+    freight = grn.freight_amount or 0.0
+    if freight < 0:
+        raise HTTPException(status_code=400, detail="Freight charges can't be negative")
+
     db_grn = models.GRN(
         grn_number=grn.grn_number,
         purchase_order_id=grn.purchase_order_id,
         vehicle_no=grn.vehicle_no,
+        freight_amount=freight,
         notes=grn.notes,
     )
     db.add(db_grn)
@@ -74,12 +94,16 @@ async def create_grn(
                        f"for item {line.item_id}",
             )
 
+        batch_no = (line.batch_no or "").strip()
+        if not batch_no:
+            batch_no = _auto_batch_no(db, line.item_id)
+
         db_line = models.GRNLine(
             grn_id=db_grn.id,
             po_line_id=line.po_line_id,
             item_id=line.item_id,
             warehouse_id=line.warehouse_id,
-            batch_no=line.batch_no,
+            batch_no=batch_no,
             quantity=line.quantity,
             rate=line.rate,
         )
@@ -88,7 +112,7 @@ async def create_grn(
         stock_entry = models.StockLedgerEntry(
             item_id=line.item_id,
             warehouse_id=line.warehouse_id,
-            batch_no=line.batch_no,
+            batch_no=batch_no,
             quantity=line.quantity,   # positive = in
             rate=line.rate,
             is_toll_stock=0,
@@ -117,6 +141,21 @@ async def create_grn(
         notes=f"Bill for GRN {grn.grn_number}",
     )
     db.add(ledger_entry)
+
+    # Freight is its own ledger entry and its own total on the PO — never mixed into the goods
+    # value. If the PO was already marked paid, the new freight makes a balance due again.
+    if freight > 0:
+        db.add(models.VendorLedgerEntry(
+            vendor_id=po.vendor_id,
+            direction=models.LedgerDirection.debit,
+            amount=freight,
+            ref_type="GRN_FREIGHT",
+            ref_id=db_grn.id,
+            notes=f"Freight for GRN {grn.grn_number}",
+        ))
+        po.freight_charges = (po.freight_charges or 0.0) + freight
+        if po.payment_status == models.PaymentStatus.paid:
+            po.payment_status = models.PaymentStatus.unpaid
 
     # Everything above is validated and staged (flushed, not committed) — only now
     # do we write the file, so a failed save doesn't leave a half-created GRN and

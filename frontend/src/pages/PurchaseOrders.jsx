@@ -4,6 +4,8 @@ import { api, downloadFile, pktDay } from "../api";
 import { generateDocNumber } from "../docNumbers";
 import { Card, SectionTitle, Button, Input, Select, Table, Badge, RowActions, formatPKR, FormPanel, confirmDialog, notify } from "../components/ui";
 import PaymentStatusModal from "../components/PaymentStatusModal";
+import PaymentMethodFields, { emptyPaymentDetail } from "../components/PaymentMethodFields";
+import { useAuth } from "../auth";
 
 const STATUS_TONES = { draft: "neutral", approved: "amber", partially_received: "amber", completed: "green", cancelled: "red" };
 const STATUSES = ["draft", "approved", "partially_received", "completed", "cancelled"];
@@ -23,6 +25,11 @@ export default function PurchaseOrders() {
   const [vendorId, setVendorId] = useState("");
   const [notes, setNotes] = useState("");
   const [lines, setLines] = useState([emptyLine()]);
+  const { canDo } = useAuth();
+  const canDelete = canDo("delete_purchase_orders");
+  const [payAdvance, setPayAdvance] = useState(false);
+  const [advanceAmount, setAdvanceAmount] = useState("");
+  const [advanceDetail, setAdvanceDetail] = useState(emptyPaymentDetail());
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -69,6 +76,7 @@ export default function PurchaseOrders() {
 
   function resetForm() {
     setPoNumber(generateDocNumber("PO")); setNotes(""); setLines([emptyLine()]);
+    setPayAdvance(false); setAdvanceAmount(""); setAdvanceDetail(emptyPaymentDetail());
     setVendorId(vendors[0]?.id || "");
   }
 
@@ -80,6 +88,7 @@ export default function PurchaseOrders() {
 
   function startEdit(po) {
     setEditingId(po.id);
+    setPayAdvance(false);
     setPoNumber(po.po_number);
     setVendorId(po.vendor_id);
     setNotes(po.notes || "");
@@ -113,6 +122,21 @@ export default function PurchaseOrders() {
       if (editingId) {
         await api.updatePurchaseOrder(editingId, payload);
       } else {
+        if (payAdvance) {
+          const amt = Number(advanceAmount);
+          if (!(amt > 0)) { setError("Enter the advance amount, or untick the advance option."); return; }
+          if (amt > total + 0.01) { setError("The advance can't be more than the PO total."); return; }
+          payload.advance_splits = [{
+            amount: amt,
+            payment_method: advanceDetail.payment_method,
+            cheque_number: advanceDetail.cheque_number || null,
+            cheque_bank: advanceDetail.cheque_bank || null,
+            our_bank: advanceDetail.our_bank || null,
+            other_party_name: advanceDetail.other_party_name || null,
+            other_party_bank: advanceDetail.other_party_bank || null,
+            vendor_bank_account_id: advanceDetail.vendor_bank_account_id || null,
+          }];
+        }
         await api.createPurchaseOrder(payload);
       }
       setEditingId(null);
@@ -142,6 +166,16 @@ export default function PurchaseOrders() {
     if (!(await confirmDialog(`Mark ${po.po_number} as unpaid? This reverses the recorded payment in the vendor's ledger.`, { danger: false }))) return;
     await api.updatePOPaymentStatus(po.id, { payment_status: "unpaid" });
     load();
+  }
+
+  // Nothing left to pay (the advance covered it all) → just mark it paid; otherwise ask how.
+  async function startPaying(po) {
+    if ((po.balance_due || 0) <= 0.01) {
+      try { await api.updatePOPaymentStatus(po.id, { payment_status: "paid", splits: [] }); load(); }
+      catch (err) { notify(err.message, "error"); }
+      return;
+    }
+    setPaymentModalPo(po);
   }
 
   async function confirmPaid(payload) {
@@ -201,6 +235,29 @@ export default function PurchaseOrders() {
                 <Button type="button" variant="secondary" className="mt-3" onClick={addLine}>+ Add line</Button>
               </div>
 
+              {editingId ? (
+                (pos.find((p) => p.id === editingId)?.advance_amount || 0) > 0 && (
+                  <div className="rounded-[20px] bg-mint text-forest text-sm px-4 py-3">
+                    Advance already paid: <b className="stencil">Rs. {formatPKR(pos.find((p) => p.id === editingId).advance_amount)}</b>
+                  </div>
+                )
+              ) : (
+                <div className="rounded-[22px] bg-surface-2 p-4 space-y-3">
+                  <label className="flex items-center gap-3 text-sm font-bold text-forest cursor-pointer min-h-[44px]">
+                    <input type="checkbox" className="w-5 h-5" checked={payAdvance} onChange={(e) => setPayAdvance(e.target.checked)} />
+                    Pay an advance to the vendor now
+                  </label>
+                  {payAdvance && (
+                    <>
+                      <Input label="Advance amount (Rs.)" type="number" min="0" value={advanceAmount} onChange={(e) => setAdvanceAmount(e.target.value)}
+                        hint={total > 0 ? `PO total is Rs. ${formatPKR(total)}. Whatever is not paid now stays as balance due.` : "Add line items first so the PO total is known."} />
+                      <PaymentMethodFields value={advanceDetail} onChange={setAdvanceDetail} direction="outgoing"
+                        vendorBankAccounts={vendors.find((v) => String(v.id) === String(vendorId))?.bank_accounts || []} />
+                    </>
+                  )}
+                </div>
+              )}
+
               <div className="flex items-center justify-between border-t border-border pt-4">
                 <div className="stencil text-sm text-text-muted">
                   Total: <span className="text-amber-soft">Rs. {formatPKR(total)}</span>
@@ -245,19 +302,35 @@ export default function PurchaseOrders() {
               key: "value",
               label: "Value",
               mono: true,
-              render: (row) => `Rs. ${formatPKR(row.lines.reduce((s, l) => s + l.quantity * l.rate, 0))}`,
+              render: (row) => {
+                const goods = row.goods_total ?? row.lines.reduce((s, l) => s + l.quantity * l.rate, 0);
+                const freight = row.freight_charges || 0;
+                return (
+                  <div className="leading-snug">
+                    <div className="font-bold">Rs. {formatPKR(goods + freight)}</div>
+                    {freight > 0 && (
+                      <div className="text-[11px] font-normal text-text-muted">Goods Rs. {formatPKR(goods)} + Freight Rs. {formatPKR(freight)}</div>
+                    )}
+                  </div>
+                );
+              },
             },
             { key: "status", label: "Status", render: (row) => <Badge tone={STATUS_TONES[row.status]}>{row.status.replace(/_/g, " ")}</Badge> },
             {
               key: "payment_status", label: "Payment",
               render: (row) => (
-                <button
-                  type="button"
-                  onClick={() => row.payment_status === "paid" ? markUnpaid(row) : setPaymentModalPo(row)}
-                  title="Click to change payment status"
-                >
-                  <Badge tone={PAYMENT_TONES[row.payment_status]}>{row.payment_status}</Badge>
-                </button>
+                <div className="leading-snug">
+                  <button
+                    type="button"
+                    onClick={() => row.payment_status === "paid" ? markUnpaid(row) : startPaying(row)}
+                    title="Click to change payment status"
+                  >
+                    <Badge tone={PAYMENT_TONES[row.payment_status]}>{row.payment_status}</Badge>
+                  </button>
+                  {row.payment_status !== "paid" && row.amount_paid > 0 && (
+                    <div className="text-[11px] text-text-muted mt-1">Paid Rs. {formatPKR(row.amount_paid)} · Due Rs. {formatPKR(row.balance_due)}</div>
+                  )}
+                </div>
               ),
             },
             {
@@ -281,7 +354,7 @@ export default function PurchaseOrders() {
                 return (
                   <RowActions
                     onEdit={() => startEdit(row)}
-                    onDelete={() => handleDelete(row)}
+                    onDelete={canDelete ? () => handleDelete(row) : undefined}
                     deleteConfirm={`Delete ${row.po_number}? This can't be undone.`}
                   />
                 );
@@ -295,8 +368,8 @@ export default function PurchaseOrders() {
       {paymentModalPo && (
         <PaymentStatusModal
           title={`Mark ${paymentModalPo.po_number} as Paid`}
-          amountLabel="PO total"
-          amount={paymentModalPo.lines.reduce((s, l) => s + l.quantity * l.rate, 0)}
+          amountLabel={paymentModalPo.amount_paid > 0 ? "Balance due" : "PO total"}
+          amount={paymentModalPo.balance_due}
           direction="outgoing"
           vendorBankAccounts={vendors.find((v) => v.id === paymentModalPo.vendor_id)?.bank_accounts || []}
           onClose={() => setPaymentModalPo(null)}

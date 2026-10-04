@@ -5,9 +5,49 @@ from sqlalchemy.orm import Session
 from typing import List
 from .. import models, schemas, reporting
 from ..database import get_db
-from ..security import current_user
+from ..security import current_user, require_action
 
 router = APIRouter(prefix="/purchase-orders", tags=["Purchase Orders"])
+
+PAID_REFS = ("PO_ADVANCE", "PO_PAYMENT")
+
+
+def _goods_total(po) -> float:
+    return sum(l.quantity * l.rate for l in po.lines)
+
+
+def _paid_by_po(po_ids, db: Session) -> dict:
+    """{po_id: money paid so far (advance + later payments)} from the vendor ledger."""
+    if not po_ids:
+        return {}
+    rows = db.query(models.VendorLedgerEntry).filter(
+        models.VendorLedgerEntry.ref_type.in_(PAID_REFS),
+        models.VendorLedgerEntry.ref_id.in_(po_ids),
+        models.VendorLedgerEntry.direction == models.LedgerDirection.credit,
+    ).all()
+    out = {}
+    for r in rows:
+        out[r.ref_id] = out.get(r.ref_id, 0.0) + r.amount
+    return out
+
+
+def _decorate(pos, db: Session):
+    """Attach the computed money fields the API returns (goods / freight / total / paid / due)."""
+    single = not isinstance(pos, list)
+    items = [pos] if single else pos
+    paid = _paid_by_po([p.id for p in items], db)
+    for p in items:
+        goods = _goods_total(p)
+        freight = p.freight_charges or 0.0
+        p.goods_total = goods
+        p.total_value = goods + freight
+        p.amount_paid = paid.get(p.id, 0.0)
+        p.balance_due = max(p.total_value - p.amount_paid, 0.0)
+    return pos
+
+
+def _remaining_due(po, db: Session) -> float:
+    return max(_goods_total(po) + (po.freight_charges or 0.0) - _paid_by_po([po.id], db).get(po.id, 0.0), 0.0)
 
 
 @router.post("/", response_model=schemas.PurchaseOrderOut)
@@ -25,6 +65,8 @@ def create_purchase_order(po: schemas.PurchaseOrderCreate, db: Session = Depends
         vendor_id=po.vendor_id,
         notes=po.notes,
         status=models.POStatus.approved,
+        advance_amount=0.0,
+        freight_charges=0.0,
     )
     db.add(db_po)
     db.flush()  # get db_po.id before commit
@@ -40,15 +82,52 @@ def create_purchase_order(po: schemas.PurchaseOrderCreate, db: Session = Depends
             rate=line.rate,
         )
         db.add(db_line)
+    db.flush()
+    db.refresh(db_po)
+
+    # Optional advance: posted as credits on the vendor's ledger right away.
+    if po.advance_splits:
+        goods = _goods_total(db_po)
+        advance = 0.0
+        for split in po.advance_splits:
+            _validate_split(split, po.vendor_id, db)
+            advance += split.amount
+        if advance > goods + 0.01:
+            raise HTTPException(
+                status_code=400,
+                detail=f"The advance (Rs. {advance:,.2f}) is more than the PO value (Rs. {goods:,.2f})",
+            )
+        n = len(po.advance_splits)
+        for i, split in enumerate(po.advance_splits, start=1):
+            note = f"Advance for {db_po.po_number}" + (f" (split {i}/{n})" if n > 1 else "")
+            db.add(models.VendorLedgerEntry(
+                vendor_id=po.vendor_id,
+                direction=models.LedgerDirection.credit,
+                amount=split.amount,
+                ref_type="PO_ADVANCE",
+                ref_id=db_po.id,
+                entry_date=datetime.datetime.utcnow(),
+                notes=note,
+                payment_method=split.payment_method,
+                cheque_number=split.cheque_number,
+                cheque_bank=split.cheque_bank,
+                our_bank=split.our_bank,
+                other_party_name=split.other_party_name,
+                other_party_bank=split.other_party_bank,
+                vendor_bank_account_id=split.vendor_bank_account_id,
+            ))
+        db_po.advance_amount = advance
+        if abs(advance - goods) <= 0.01:
+            db_po.payment_status = models.PaymentStatus.paid   # fully paid up-front
 
     db.commit()
     db.refresh(db_po)
-    return db_po
+    return _decorate(db_po, db)
 
 
 @router.get("/", response_model=List[schemas.PurchaseOrderOut])
 def list_purchase_orders(db: Session = Depends(get_db)):
-    return db.query(models.PurchaseOrder).all()
+    return _decorate(db.query(models.PurchaseOrder).all(), db)
 
 
 @router.get("/report")
@@ -75,7 +154,7 @@ def purchase_order_report(request: Request, start_date: datetime.date = None, en
     payments_by_po = {}
     if po_ids:
         for pay in db.query(models.VendorLedgerEntry).filter(
-            models.VendorLedgerEntry.ref_type == "PO_PAYMENT", models.VendorLedgerEntry.ref_id.in_(po_ids),
+            models.VendorLedgerEntry.ref_type.in_(PAID_REFS), models.VendorLedgerEntry.ref_id.in_(po_ids),
         ).order_by(models.VendorLedgerEntry.entry_date, models.VendorLedgerEntry.id).all():
             payments_by_po.setdefault(pay.ref_id, []).append(pay)
 
@@ -91,44 +170,45 @@ def purchase_order_report(request: Request, start_date: datetime.date = None, en
     wb = openpyxl.Workbook()
 
     # ------------------------------------------------ sheet 1: purchase orders
-    cols = ["PO Date", "PO No.", "Vendor", "Status", "Items / Description", "PO Amount (Rs.)",
+    cols = ["PO Date", "PO No.", "Vendor", "Status", "Items / Description", "PO Amount (Rs.)", "Freight (Rs.)",
             "Payment Status", "Amount Paid (Rs.)", "Balance Due (Rs.)", "Payment Details", "Notes"]
     ws, r = reporting.new_sheet(wb, "Purchase Orders", "Riwayat Oils and Fats — Purchase Order Report", sub, cols,
-                                [13, 20, 24, 16, 46, 17, 13, 17, 17, 52, 28])
+                                [13, 20, 24, 16, 46, 17, 14, 13, 17, 17, 52, 28])
     n = len(cols)
     by_day = {}
     for p in pos:
         by_day.setdefault(reporting.pkt_date(p.order_date), []).append(p)
-    g_amt = g_paid = g_bal = 0.0
+    g_amt = g_fr = g_paid = g_bal = 0.0
     if not pos:
         ws.cell(row=r, column=1, value="No purchase orders were raised in this period.")
         r += 1
     for day in sorted(by_day):
-        d_amt = d_paid = d_bal = 0.0
+        d_amt = d_fr = d_paid = d_bal = 0.0
         for p in by_day[day]:
             amt = po_total(p)
+            fr = p.freight_charges or 0.0     # freight is reported in its own column, never folded into PO Amount
             pays = payments_by_po.get(p.id, [])
             paid = sum(x.amount for x in pays)
-            bal = amt - paid
+            bal = amt + fr - paid
             items_text = "\n".join(
                 f"{i}) {l.item.name} — {l.quantity:g} {l.item.uom.symbol} × Rs. {l.rate:,.2f} = Rs. {l.quantity * l.rate:,.2f}"
                 for i, l in enumerate(p.lines, start=1))
             pay_text = "\n".join(
                 f"{reporting.fmt_day(reporting.pkt_date(x.entry_date))} — Rs. {x.amount:,.2f} — {pay_desc(x)}" for x in pays) or "No payment recorded"
             reporting.write_row(ws, r, [
-                day, p.po_number, p.vendor.name, p.status.value.replace("_", " ").title(), items_text, amt,
+                day, p.po_number, p.vendor.name, p.status.value.replace("_", " ").title(), items_text, amt, fr,
                 p.payment_status.value.title(), paid, bal, pay_text, p.notes or "",
-            ], money_cols=(6, 8, 9), wrap_cols=(3, 5, 10, 11))
+            ], money_cols=(6, 7, 9, 10), wrap_cols=(3, 5, 11, 12))
             ws.cell(row=r, column=1).number_format = "dd mmm yyyy"
-            d_amt, d_paid, d_bal = d_amt + amt, d_paid + paid, d_bal + bal
+            d_amt, d_fr, d_paid, d_bal = d_amt + amt, d_fr + fr, d_paid + paid, d_bal + bal
             r += 1
         cnt = len(by_day[day])
         reporting.write_total_row(ws, r, f"Total for {reporting.fmt_day(day)}  ({cnt} PO{'s' if cnt != 1 else ''})", 1,
-                                  {6: d_amt, 8: d_paid, 9: d_bal}, n, reporting.DAY_FILL)
-        g_amt, g_paid, g_bal = g_amt + d_amt, g_paid + d_paid, g_bal + d_bal
+                                  {6: d_amt, 7: d_fr, 9: d_paid, 10: d_bal}, n, reporting.DAY_FILL)
+        g_amt, g_fr, g_paid, g_bal = g_amt + d_amt, g_fr + d_fr, g_paid + d_paid, g_bal + d_bal
         r += 2
     reporting.write_total_row(ws, r, f"GROSS TOTAL  ({len(pos)} PO{'s' if len(pos) != 1 else ''}, {len(by_day)} day{'s' if len(by_day) != 1 else ''})", 1,
-                              {6: g_amt, 8: g_paid, 9: g_bal}, n, reporting.GROSS_FILL, border=reporting.TOP_DOUBLE)
+                              {6: g_amt, 7: g_fr, 9: g_paid, 10: g_bal}, n, reporting.GROSS_FILL, border=reporting.TOP_DOUBLE)
     if cancelled:
         ws.cell(row=r + 2, column=1, value=f"Note: {len(cancelled)} cancelled PO(s) in this period are not included: "
                                             + ", ".join(p.po_number for p in cancelled)).font = reporting.Font(italic=True, color="777777")
@@ -193,7 +273,7 @@ def get_purchase_order(po_id: int, db: Session = Depends(get_db)):
     po = db.query(models.PurchaseOrder).filter(models.PurchaseOrder.id == po_id).first()
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
-    return po
+    return _decorate(po, db)
 
 
 @router.put("/{po_id}", response_model=schemas.PurchaseOrderOut)
@@ -230,12 +310,21 @@ def update_purchase_order(po_id: int, update: schemas.PurchaseOrderUpdate, db: S
                 purchase_order_id=po.id, item_id=line.item_id, quantity=line.quantity, rate=line.rate,
             ))
 
+    db.flush()
+    db.refresh(po)
+    if (po.advance_amount or 0) > _goods_total(po) + 0.01:
+        db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail=f"The new PO value is less than the advance already paid (Rs. {po.advance_amount:,.2f}). "
+                   "Keep the value at or above the advance.",
+        )
     db.commit()
     db.refresh(po)
-    return po
+    return _decorate(po, db)
 
 
-@router.delete("/{po_id}")
+@router.delete("/{po_id}", dependencies=[Depends(require_action("delete_purchase_orders"))])
 def delete_purchase_order(po_id: int, db: Session = Depends(get_db)):
     po = db.query(models.PurchaseOrder).filter(models.PurchaseOrder.id == po_id).first()
     if not po:
@@ -248,6 +337,11 @@ def delete_purchase_order(po_id: int, db: Session = Depends(get_db)):
                    "vendor ledger entries depend on it. Set its status to cancelled instead if it's no longer needed.",
         )
 
+    # Remove the advance / payment postings too, so no orphan credit is left on the vendor's ledger.
+    for entry in db.query(models.VendorLedgerEntry).filter(
+        models.VendorLedgerEntry.ref_type.in_(PAID_REFS), models.VendorLedgerEntry.ref_id == po.id,
+    ).all():
+        db.delete(entry)
     db.delete(po)
     db.commit()
     return {"message": "Purchase order deleted", "po_id": po_id}
@@ -262,7 +356,7 @@ def cancel_purchase_order(po_id: int, db: Session = Depends(get_db)):
     po.status = models.POStatus.cancelled
     db.commit()
     db.refresh(po)
-    return po
+    return _decorate(po, db)
 
 
 def _validate_split(split: schemas.PaymentSplitLine, vendor_id: int, db: Session):
@@ -286,6 +380,8 @@ def _validate_split(split: schemas.PaymentSplitLine, vendor_id: int, db: Session
 def _validate_splits_total(update: schemas.PaymentStatusUpdate, total_owed: float, vendor_id: int, db: Session):
     if update.payment_status != models.PaymentStatus.paid:
         return
+    if total_owed <= 0.01:
+        return   # nothing left to pay (e.g. fully covered by the advance)
     if not update.splits:
         raise HTTPException(status_code=400, detail="At least one payment split is required when marking as paid")
     for split in update.splits:
@@ -311,20 +407,24 @@ def update_po_payment_status(po_id: int, update: schemas.PaymentStatusUpdate, db
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
 
-    po_total = sum(l.quantity * l.rate for l in po.lines)
-    _validate_splits_total(update, po_total, po.vendor_id, db)
-
     existing_payments = db.query(models.VendorLedgerEntry).filter(
         models.VendorLedgerEntry.ref_type == "PO_PAYMENT",
         models.VendorLedgerEntry.ref_id == po.id,
     ).all()
 
+    if update.payment_status == models.PaymentStatus.paid and po.payment_status == models.PaymentStatus.paid:
+        raise HTTPException(status_code=400, detail="This PO is already marked paid")
+
+    # What is still owed = goods + freight − advance − anything already paid. The splits
+    # must cover exactly that (so a PO with an advance only pays the balance).
+    owed_now = _remaining_due(po, db)
+    _validate_splits_total(update, owed_now, po.vendor_id, db)
+
     if update.payment_status == models.PaymentStatus.paid:
-        if existing_payments:
-            raise HTTPException(status_code=400, detail="This PO is already marked paid")
         payment_date = update.payment_date or datetime.datetime.utcnow()
-        split_count = len(update.splits)
-        for i, split in enumerate(update.splits, start=1):
+        splits = update.splits or [] if owed_now > 0.01 else []
+        split_count = len(splits)
+        for i, split in enumerate(splits, start=1):
             note = update.notes or f"Payment for {po.po_number}"
             if split_count > 1:
                 note += f" (split {i}/{split_count})"
@@ -352,4 +452,4 @@ def update_po_payment_status(po_id: int, update: schemas.PaymentStatusUpdate, db
 
     db.commit()
     db.refresh(po)
-    return po
+    return _decorate(po, db)

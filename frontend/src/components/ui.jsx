@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Icon from "./Icon";
 import { confirmDialog } from "./Dialogs";
 
@@ -84,7 +84,14 @@ export function Textarea({ label, hint, className = "", ...props }) {
   the first column is the heading, the rest are "label: value" lines, and a
   column with no label (edit / delete buttons) sits at the bottom.
 */
-export function Table({ columns, rows, emptyLabel = "Nothing here yet." }) {
+// onRowClick(row): makes each row (and phone card) open something, e.g. a details panel.
+// Clicks on buttons / links / inputs inside the row keep doing their own thing.
+export function Table({ columns, rows, emptyLabel = "Nothing here yet.", onRowClick }) {
+  const clickProps = (row) => onRowClick ? {
+    onClick: (e) => { if (!e.target.closest("button, a, input, select, label, textarea")) onRowClick(row); },
+    role: "button", tabIndex: 0,
+    onKeyDown: (e) => { if (e.key === "Enter" && e.target === e.currentTarget) onRowClick(row); },
+  } : {};
   if (!rows || rows.length === 0) {
     return (
       <div className="flex flex-col items-center gap-2 rounded-2xl bg-surface-2/60 border border-dashed border-border py-10 px-4 text-center">
@@ -111,7 +118,7 @@ export function Table({ columns, rows, emptyLabel = "Nothing here yet." }) {
           </thead>
           <tbody>
             {rows.map((row, i) => (
-              <tr key={i} className="border-t border-[#EEF1EB] hover:bg-surface-2/70 transition-colors">
+              <tr key={i} {...clickProps(row)} className={`border-t border-[#EEF1EB] hover:bg-surface-2/70 transition-colors ${onRowClick ? "cursor-pointer" : ""}`}>
                 {columns.map((col) => (
                   <td key={col.key} className={`px-3 py-3.5 align-middle ${col.mono ? "stencil" : ""}`}>
                     {col.render ? col.render(row) : row[col.key]}
@@ -129,7 +136,7 @@ export function Table({ columns, rows, emptyLabel = "Nothing here yet." }) {
           const labelled = rest.filter((c) => c.label);
           const actions = rest.filter((c) => !c.label);
           return (
-            <div key={i} className="rounded-2xl bg-surface-2/80 p-4 flex flex-col gap-2.5">
+            <div key={i} {...clickProps(row)} className={`rounded-2xl bg-surface-2/80 p-4 flex flex-col gap-2.5 ${onRowClick ? "cursor-pointer active:bg-mint" : ""}`}>
               <div className="text-[15px] font-bold text-text break-words">{cell(first)}</div>
               {labelled.map((col) => (
                 <div key={col.key} className="flex items-start justify-between gap-4 text-sm">
@@ -297,5 +304,81 @@ export function Stat({ icon = "chart", tone = "green", label, value, sub }) {
       <div className="text-[26px] sm:text-[28px] font-extrabold text-forest tracking-tight leading-none stencil">{value}</div>
       {sub && <div className="text-xs text-text-muted leading-snug">{sub}</div>}
     </Card>
+  );
+}
+
+
+/* Type-to-filter dropdown. options: [{ value, label, sub? }]. onChange gets the chosen value. */
+export function SearchSelect({ label, value, onChange, options, placeholder = "Type to search…", disabled = false, hint }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const boxRef = useRef(null);
+  const selected = options.find((o) => String(o.value) === String(value));
+
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter((o) => `${o.label} ${o.sub || ""}`.toLowerCase().includes(q));
+  }, [options, query]);
+
+  useEffect(() => {
+    const h = (e) => { if (boxRef.current && !boxRef.current.contains(e.target)) { setOpen(false); setQuery(""); } };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, []);
+  useEffect(() => { setActive(0); }, [query]);
+
+  function pick(o) { onChange(o.value); setOpen(false); setQuery(""); }
+
+  function onKeyDown(e) {
+    if (e.key === "ArrowDown") { e.preventDefault(); setOpen(true); setActive((a) => Math.min(a + 1, shown.length - 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setActive((a) => Math.max(a - 1, 0)); }
+    else if (e.key === "Enter" && open) { e.preventDefault(); if (shown[active]) pick(shown[active]); }
+    else if (e.key === "Escape" && open) { e.stopPropagation(); setOpen(false); setQuery(""); }
+  }
+
+  return (
+    <div className="block" ref={boxRef}>
+      <FieldLabel label={label} />
+      <div className="relative">
+        <input
+          className="field"
+          disabled={disabled}
+          placeholder={selected ? selected.label : placeholder}
+          value={open ? query : (selected ? selected.label : "")}
+          onFocus={() => setOpen(true)}
+          onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
+          onKeyDown={onKeyDown}
+          autoComplete="off"
+        />
+        {open && !disabled && (
+          <div className="absolute z-30 left-0 right-0 top-[52px] max-h-64 overflow-y-auto bg-surface rounded-[20px] border border-border shadow-frame p-1.5">
+            {shown.length === 0 && <div className="px-4 py-3 text-sm text-text-muted">No match</div>}
+            {shown.map((o, i) => (
+              <button
+                type="button" key={o.value}
+                onMouseDown={(e) => { e.preventDefault(); pick(o); }}
+                onMouseEnter={() => setActive(i)}
+                className={`w-full text-left px-4 min-h-[44px] py-1.5 rounded-full text-sm ${i === active ? "bg-mint text-forest font-bold" : "text-text"} ${String(o.value) === String(value) ? "font-bold" : ""}`}
+              >
+                {o.label}{o.sub && <span className="text-text-muted text-xs ml-2">{o.sub}</span>}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      {hint && <span className="block text-xs text-text-muted mt-1.5">{hint}</span>}
+    </div>
+  );
+}
+
+/* Read-only "label: value" rows for details panels. */
+export function DetailRow({ label, children }) {
+  return (
+    <div className="flex items-start justify-between gap-4 py-2 text-sm border-b border-border/50 last:border-0">
+      <span className="text-text-muted shrink-0">{label}</span>
+      <span className="text-right min-w-0 break-words font-semibold text-text">{children ?? "—"}</span>
+    </div>
   );
 }

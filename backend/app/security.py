@@ -66,6 +66,7 @@ PREFIX_TO_MODULE = {p: m[0] for m in MODULES for p in m[3]}
 # Extra actions that sit on top of module access.
 ACTIONS = [
     ("approve_stock_adjustments", "Approve stock adjustments"),
+    ("edit_purchase_orders", "Edit purchase orders"),
     ("delete_purchase_orders", "Delete purchase orders"),
     ("manage_finalized_payroll", "Reopen or delete finalized payroll runs"),
 ]

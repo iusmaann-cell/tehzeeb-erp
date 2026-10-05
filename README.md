@@ -640,3 +640,10 @@ FBR sales tax return — treat them as an operational dashboard, not filed accou
 - Note: this covers your own-brand revenue (Riwayat oil/ghee/soap to distributors).
   Toll revenue (Commission Invoices) was already built in Phase 3 — the two stay
   separate since they're fundamentally different transactions.
+
+## Phase 18 — details panels, PO edit rules, searchable items
+
+- Clicking a purchase order, a goods-received note or a vendor now opens a read-only details panel (edit/ledger buttons are inside it).
+- Purchase orders can be edited only with the new **Edit purchase orders** permission (admins always have it; grant it to a role in Settings → Accounts). Partially received POs are editable: received lines keep their item/rate and can't drop below the received quantity, the vendor is locked, new lines can be added.
+- Cancel is hidden (and refused by the server) once a PO is completed/fully received or fully paid.
+- Item and vendor pickers on the PO form are type-to-search dropdowns.

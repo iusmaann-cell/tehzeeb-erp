@@ -4,10 +4,14 @@ import { api, resolveFileUrl, pktToday } from "../api";
 import { generateDocNumber } from "../docNumbers";
 import { Card, SectionTitle, Button, Input, Select, Table, formatPKR, FormPanel } from "../components/ui";
 import BillPhotoUpload from "../components/BillPhotoUpload";
+import GRNDetail from "../components/GRNDetail";
 
 export default function GRN() {
   const [grns, setGrns] = useState([]);
   const [pos, setPos] = useState([]);
+  const [allPos, setAllPos] = useState([]);
+  const [vendors, setVendors] = useState([]);
+  const [detailGrn, setDetailGrn] = useState(null);
   const [warehouses, setWarehouses] = useState([]);
   const [items, setItems] = useState([]);
   const [uoms, setUoms] = useState([]);
@@ -22,7 +26,9 @@ export default function GRN() {
   const [saving, setSaving] = useState(false);
 
   async function load() {
-    const [grnData, poData, whData, itemData, uomData] = await Promise.all([api.getGRNs(), api.getPurchaseOrders(), api.getWarehouses(), api.getItems(), api.getUOMs()]);
+    const [grnData, poData, whData, itemData, uomData, vendData] = await Promise.all([api.getGRNs(), api.getPurchaseOrders(), api.getWarehouses(), api.getItems(), api.getUOMs(), api.getVendors()]);
+    setAllPos(poData);
+    setVendors(vendData);
     setGrns(grnData.sort((a, b) => b.id - a.id));
     setPos(poData.filter((p) => p.status === "approved" || p.status === "partially_received"));
     setWarehouses(whData);
@@ -223,8 +229,15 @@ export default function GRN() {
             },
           ]}
           rows={grns}
+          onRowClick={(row) => setDetailGrn(row)}
         />
       </Card>
+
+      {detailGrn && (() => {
+        const po = allPos.find((p) => p.id === detailGrn.purchase_order_id);
+        const vendor = vendors.find((v) => v.id === po?.vendor_id);
+        return <GRNDetail grn={detailGrn} po={po} vendor={vendor} items={items} uoms={uoms} warehouses={warehouses} onClose={() => setDetailGrn(null)} />;
+      })()}
     </div>
   );
 }

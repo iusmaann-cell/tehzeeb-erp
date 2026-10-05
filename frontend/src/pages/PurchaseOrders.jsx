@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { useIntent } from "../nav";
 import { api, downloadFile, pktDay } from "../api";
 import { generateDocNumber } from "../docNumbers";
-import { Card, SectionTitle, Button, Input, Select, Table, Badge, RowActions, formatPKR, FormPanel, confirmDialog, notify } from "../components/ui";
+import { Card, SectionTitle, Button, Input, Select, SearchSelect, Table, Badge, RowActions, formatPKR, FormPanel, confirmDialog, notify } from "../components/ui";
+import PODetail from "../components/PODetail";
 import PaymentStatusModal from "../components/PaymentStatusModal";
 import PaymentMethodFields, { emptyPaymentDetail } from "../components/PaymentMethodFields";
 import { useAuth } from "../auth";
@@ -27,6 +28,8 @@ export default function PurchaseOrders() {
   const [lines, setLines] = useState([emptyLine()]);
   const { canDo } = useAuth();
   const canDelete = canDo("delete_purchase_orders");
+  const canEditPO = canDo("edit_purchase_orders");   // administrators only, unless a role is given it
+  const [detailPo, setDetailPo] = useState(null);
   const [payAdvance, setPayAdvance] = useState(false);
   const [advanceAmount, setAdvanceAmount] = useState("");
   const [advanceDetail, setAdvanceDetail] = useState(emptyPaymentDetail());
@@ -92,7 +95,7 @@ export default function PurchaseOrders() {
     setPoNumber(po.po_number);
     setVendorId(po.vendor_id);
     setNotes(po.notes || "");
-    setLines(po.lines.map((l) => ({ item_id: l.item_id, quantity: l.quantity, rate: l.rate })));
+    setLines(po.lines.map((l) => ({ id: l.id, item_id: l.item_id, quantity: l.quantity, rate: l.rate, received: l.received_quantity || 0 })));
     setShowForm(true);
   }
 
@@ -117,7 +120,7 @@ export default function PurchaseOrders() {
         notes,
         lines: lines
           .filter((l) => l.item_id && l.quantity && l.rate)
-          .map((l) => ({ item_id: Number(l.item_id), quantity: Number(l.quantity), rate: Number(l.rate) })),
+          .map((l) => ({ ...(l.id ? { id: l.id } : {}), item_id: Number(l.item_id), quantity: Number(l.quantity), rate: Number(l.rate) })),
       };
       if (editingId) {
         await api.updatePurchaseOrder(editingId, payload);
@@ -157,9 +160,20 @@ export default function PurchaseOrders() {
     }
   }
 
-  async function handleCancel(po) {
-    await api.cancelPurchaseOrder(po.id);
-    load();
+  // Cancel only makes sense while a PO is still open: not once everything is received or it is paid in full.
+  function canCancel(po) {
+    return hasReceipts(po) && po.status !== "cancelled" && po.status !== "completed" && po.payment_status !== "paid";
+  }
+
+  async function askCancel(po) {
+    if (!(await confirmDialog(`Cancel ${po.po_number}? It already has goods received, so it can't be deleted, but cancelling marks it closed.`, { confirmLabel: "Yes, cancel it" }))) return;
+    try {
+      await api.cancelPurchaseOrder(po.id);
+      setDetailPo(null);
+      load();
+    } catch (err) {
+      notify(err.message, "error");
+    }
   }
 
   async function markUnpaid(po) {
@@ -211,9 +225,10 @@ export default function PurchaseOrders() {
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <Input label="PO number" placeholder="PO-2026-0001" required value={poNumber} onChange={(e) => setPoNumber(e.target.value)} />
-                <Select label="Vendor" value={vendorId} onChange={(e) => setVendorId(e.target.value)}>
-                  {vendors.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
-                </Select>
+                <SearchSelect label="Vendor" value={vendorId} onChange={setVendorId}
+                  disabled={editingId && lines.some((l) => l.received > 0)}
+                  hint={editingId && lines.some((l) => l.received > 0) ? "Goods are already received, so the vendor can't change." : undefined}
+                  options={vendors.map((v) => ({ value: v.id, label: v.name }))} />
                 <Input label="Notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} />
               </div>
 
@@ -222,13 +237,13 @@ export default function PurchaseOrders() {
                 <div className="space-y-2">
                   {lines.map((line, i) => (
                     <div key={i} className="grid grid-cols-1 sm:grid-cols-[2fr_1fr_1fr_auto] gap-3 items-end">
-                      <Select label={i === 0 ? "Item" : undefined} value={line.item_id} onChange={(e) => updateLine(i, "item_id", e.target.value)}>
-                        <option value="">Select item&hellip;</option>
-                        {items.map((it) => <option key={it.id} value={it.id}>{it.name} ({it.code})</option>)}
-                      </Select>
-                      <Input label={i === 0 ? "Quantity" : undefined} type="number" placeholder="Qty" value={line.quantity} onChange={(e) => updateLine(i, "quantity", e.target.value)} />
-                      <Input label={i === 0 ? "Rate (Rs.)" : undefined} type="number" placeholder="Rate" value={line.rate} onChange={(e) => updateLine(i, "rate", e.target.value)} />
-                      <Button type="button" variant="ghost" onClick={() => removeLine(i)} disabled={lines.length === 1}>✕</Button>
+                      <SearchSelect label={i === 0 ? "Item" : undefined} value={line.item_id} onChange={(v) => updateLine(i, "item_id", v)}
+                        disabled={line.received > 0} placeholder="Type to search items…"
+                        options={items.map((it) => ({ value: it.id, label: it.name, sub: it.code }))}
+                        hint={line.received > 0 ? `${line.received} already received` : undefined} />
+                      <Input label={i === 0 ? "Quantity" : undefined} type="number" placeholder="Qty" min={line.received || undefined} value={line.quantity} onChange={(e) => updateLine(i, "quantity", e.target.value)} />
+                      <Input label={i === 0 ? "Rate (Rs.)" : undefined} type="number" placeholder="Rate" disabled={line.received > 0} value={line.rate} onChange={(e) => updateLine(i, "rate", e.target.value)} />
+                      <Button type="button" variant="ghost" onClick={() => removeLine(i)} disabled={lines.length === 1 || line.received > 0}>✕</Button>
                     </div>
                   ))}
                 </div>
@@ -293,6 +308,7 @@ export default function PurchaseOrders() {
 
       <Card>
         <Table
+          onRowClick={(row) => setDetailPo(row)}
           emptyLabel={pos.length === 0 ? "No purchase orders yet." : "No purchase orders match your search/filter."}
           columns={[
             { key: "po_number", label: "PO Number", mono: true },
@@ -337,26 +353,23 @@ export default function PurchaseOrders() {
               key: "actions",
               label: "",
               render: (row) => {
-                const blocked = hasReceipts(row);
-                if (blocked) {
-                  return row.status === "cancelled"
-                    ? <span className="text-text-muted text-xs">—</span>
-                    : (
-                      <button
-                        type="button"
-                        className="text-xs text-amber-soft hover:underline"
-                        onClick={async () => { if ((await confirmDialog(`Cancel ${row.po_number}? It already has goods received, so it can't be deleted, but cancelling marks it closed.`, { confirmLabel: "Yes, cancel it" }))) handleCancel(row); }}
-                      >
-                        Cancel
-                      </button>
-                    );
-                }
+                const cancelled = row.status === "cancelled";
+                const received = hasReceipts(row);
+                const showEdit = canEditPO && !cancelled;
+                const showDelete = canDelete && !received;
+                const showCancel = canCancel(row);
+                if (!showEdit && !showDelete && !showCancel) return <span className="text-text-muted text-xs">—</span>;
                 return (
-                  <RowActions
-                    onEdit={() => startEdit(row)}
-                    onDelete={canDelete ? () => handleDelete(row) : undefined}
-                    deleteConfirm={`Delete ${row.po_number}? This can't be undone.`}
-                  />
+                  <div className="flex items-center gap-3">
+                    <RowActions
+                      onEdit={showEdit ? () => startEdit(row) : undefined}
+                      onDelete={showDelete ? () => handleDelete(row) : undefined}
+                      deleteConfirm={`Delete ${row.po_number}? This can't be undone.`}
+                    />
+                    {showCancel && (
+                      <button type="button" className="text-xs text-amber-soft hover:underline" onClick={() => askCancel(row)}>Cancel</button>
+                    )}
+                  </div>
                 );
               },
             },
@@ -364,6 +377,28 @@ export default function PurchaseOrders() {
           rows={filteredPos}
         />
       </Card>
+
+      {detailPo && (() => {
+        const live = pos.find((p) => p.id === detailPo.id) || detailPo;   // stays fresh after a payment
+        const cancelled = live.status === "cancelled";
+        return (
+          <PODetail
+            po={live}
+            vendor={vendors.find((v) => v.id === live.vendor_id)}
+            items={items}
+            onClose={() => setDetailPo(null)}
+            actions={(
+              <>
+                {live.payment_status === "paid"
+                  ? <Button variant="secondary" onClick={() => markUnpaid(live)}>Mark unpaid</Button>
+                  : !cancelled && <Button variant="secondary" onClick={() => { setDetailPo(null); startPaying(live); }}>Mark paid</Button>}
+                {canCancel(live) && <Button variant="secondary" onClick={() => askCancel(live)}>Cancel PO</Button>}
+                {canEditPO && !cancelled && <Button onClick={() => { setDetailPo(null); startEdit(live); }}>Edit</Button>}
+              </>
+            )}
+          />
+        );
+      })()}
 
       {paymentModalPo && (
         <PaymentStatusModal

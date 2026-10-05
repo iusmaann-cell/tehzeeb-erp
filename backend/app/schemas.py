@@ -219,11 +219,17 @@ class PurchaseOrderCreate(BaseModel):
     advance_splits: Optional[List[PaymentSplitLine]] = None
 
 
+class POLineUpdate(POLineBase):
+    id: Optional[int] = None   # existing line being kept/changed; omit for a brand-new line
+
+
 class PurchaseOrderUpdate(BaseModel):
     po_number: Optional[str] = None
     vendor_id: Optional[int] = None
     notes: Optional[str] = None
-    lines: Optional[List[POLineCreate]] = None   # if provided, replaces all lines
+    # If provided this is the PO's full list of lines. Lines that already have goods
+    # received must be sent back with their id (see update_purchase_order for the rules).
+    lines: Optional[List[POLineUpdate]] = None
 
 
 class PurchaseOrderOut(BaseModel):

@@ -276,49 +276,102 @@ def get_purchase_order(po_id: int, db: Session = Depends(get_db)):
     return _decorate(po, db)
 
 
-@router.put("/{po_id}", response_model=schemas.PurchaseOrderOut)
+@router.put("/{po_id}", response_model=schemas.PurchaseOrderOut,
+            dependencies=[Depends(require_action("edit_purchase_orders"))])
 def update_purchase_order(po_id: int, update: schemas.PurchaseOrderUpdate, db: Session = Depends(get_db)):
+    """
+    Edit a PO (administrators only unless a role is given 'Edit purchase orders').
+
+    No goods received yet: anything can change, the lines are simply replaced.
+    Goods already received (partly or fully): the vendor can't change, and each received
+    line keeps its item and rate — its quantity may only be raised to at least what was
+    received. New lines can be added, and lines with nothing received can be changed or removed.
+    """
     po = db.query(models.PurchaseOrder).filter(models.PurchaseOrder.id == po_id).first()
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
+    if po.status == models.POStatus.cancelled:
+        raise HTTPException(status_code=400, detail="A cancelled purchase order can't be edited.")
 
-    if any(line.received_quantity > 0 for line in po.lines):
-        raise HTTPException(
-            status_code=400,
-            detail="This PO already has goods received against it and can no longer be edited. "
-                   "You can still add a new PO for any correction needed.",
-        )
+    has_receipts = any((line.received_quantity or 0) > 0 for line in po.lines)
 
     data = update.dict(exclude_unset=True)
-    lines = data.pop("lines", None)
+    data.pop("lines", None)
+    lines = update.lines if "lines" in update.model_fields_set else None
 
     if "vendor_id" in data:
+        if has_receipts and data["vendor_id"] != po.vendor_id:
+            raise HTTPException(status_code=400, detail="Goods are already received on this PO, so its vendor can't be changed.")
         vendor = db.query(models.Vendor).filter(models.Vendor.id == data["vendor_id"]).first()
         if not vendor:
             raise HTTPException(status_code=404, detail="Vendor not found")
+    if data.get("po_number") and data["po_number"] != po.po_number:
+        if db.query(models.PurchaseOrder).filter(models.PurchaseOrder.po_number == data["po_number"]).first():
+            raise HTTPException(status_code=400, detail="PO number already exists")
 
     for field, value in data.items():
         setattr(po, field, value)
 
     if lines is not None:
-        db.query(models.PurchaseOrderLine).filter(models.PurchaseOrderLine.purchase_order_id == po.id).delete()
+        if not lines:
+            raise HTTPException(status_code=400, detail="A purchase order needs at least one line.")
         for line in lines:
-            item = db.query(models.Item).filter(models.Item.id == line.item_id).first()
-            if not item:
+            if not db.query(models.Item).filter(models.Item.id == line.item_id).first():
                 raise HTTPException(status_code=404, detail=f"Item {line.item_id} not found")
-            db.add(models.PurchaseOrderLine(
-                purchase_order_id=po.id, item_id=line.item_id, quantity=line.quantity, rate=line.rate,
-            ))
+        if not has_receipts:
+            db.query(models.PurchaseOrderLine).filter(models.PurchaseOrderLine.purchase_order_id == po.id).delete()
+            for line in lines:
+                db.add(models.PurchaseOrderLine(
+                    purchase_order_id=po.id, item_id=line.item_id, quantity=line.quantity, rate=line.rate,
+                ))
+        else:
+            existing = {l.id: l for l in po.lines}
+            kept = set()
+            for line in lines:
+                cur = existing.get(line.id) if line.id else None
+                if line.id and cur is None:
+                    raise HTTPException(status_code=400, detail="One of the lines doesn't belong to this PO.")
+                if cur is None:
+                    db.add(models.PurchaseOrderLine(
+                        purchase_order_id=po.id, item_id=line.item_id, quantity=line.quantity, rate=line.rate))
+                    continue
+                kept.add(cur.id)
+                received = cur.received_quantity or 0
+                if received > 0:
+                    if line.item_id != cur.item_id or abs(line.rate - cur.rate) > 1e-9:
+                        raise HTTPException(status_code=400, detail=(
+                            f"Goods are already received on '{cur.item.name}', so its item and rate can't be changed."))
+                    if line.quantity < received - 1e-6:
+                        raise HTTPException(status_code=400, detail=(
+                            f"'{cur.item.name}': quantity can't be lower than the {received:g} already received."))
+                cur.item_id, cur.quantity, cur.rate = line.item_id, line.quantity, line.rate
+            for cur in list(po.lines):
+                if cur.id not in kept:
+                    if (cur.received_quantity or 0) > 0:
+                        raise HTTPException(status_code=400, detail=(
+                            f"'{cur.item.name}' already has goods received and can't be removed."))
+                    db.delete(cur)
 
     db.flush()
     db.refresh(po)
-    if (po.advance_amount or 0) > _goods_total(po) + 0.01:
+
+    goods = _goods_total(po)
+    if (po.advance_amount or 0) > goods + 0.01:
         db.rollback()
         raise HTTPException(
             status_code=400,
             detail=f"The new PO value is less than the advance already paid (Rs. {po.advance_amount:,.2f}). "
                    "Keep the value at or above the advance.",
         )
+
+    # Keep status honest after quantities moved: fully received / partly received.
+    if has_receipts:
+        all_in = all((l.received_quantity or 0) >= l.quantity - 1e-6 for l in po.lines)
+        po.status = models.POStatus.completed if all_in else models.POStatus.partially_received
+    # A PO marked paid whose value went up now has a balance again.
+    if po.payment_status == models.PaymentStatus.paid and _remaining_due(po, db) > 0.01:
+        po.payment_status = models.PaymentStatus.unpaid
+
     db.commit()
     db.refresh(po)
     return _decorate(po, db)
@@ -353,6 +406,10 @@ def cancel_purchase_order(po_id: int, db: Session = Depends(get_db)):
     po = db.query(models.PurchaseOrder).filter(models.PurchaseOrder.id == po_id).first()
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
+    if po.status == models.POStatus.completed:
+        raise HTTPException(status_code=400, detail="All goods are received on this PO, so it can't be cancelled.")
+    if po.payment_status == models.PaymentStatus.paid:
+        raise HTTPException(status_code=400, detail="This PO is fully paid, so it can't be cancelled.")
     po.status = models.POStatus.cancelled
     db.commit()
     db.refresh(po)

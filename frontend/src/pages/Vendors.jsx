@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { Card, SectionTitle, Button, Input, Select, Table, Badge, RowActions, formatPKR, FormPanel } from "../components/ui";
+import { Card, SectionTitle, Button, Input, Select, Table, Badge, RowActions, formatPKR, FormPanel, Modal, DetailRow } from "../components/ui";
 import LedgerDetail from "../components/LedgerDetail";
 
 const emptyForm = { name: "", contact_person: "", phone: "", payment_terms: "", opening_balance: 0 };
@@ -28,6 +28,7 @@ export default function Vendors() {
   const [search, setSearch] = useState("");
   const [balanceFilter, setBalanceFilter] = useState("all");
   const [selectedVendor, setSelectedVendor] = useState(null);
+  const [detailVendor, setDetailVendor] = useState(null);
 
   async function load() {
     setLoading(true);
@@ -214,7 +215,7 @@ export default function Vendors() {
               {
                 key: "name", label: "Vendor",
                 render: (row) => (
-                  <button type="button" className="text-amber-soft hover:underline text-left" onClick={() => setSelectedVendor(row)}>
+                  <button type="button" className="text-amber-soft hover:underline text-left" onClick={() => setDetailVendor(row)}>
                     {row.name}
                   </button>
                 ),
@@ -255,10 +256,53 @@ export default function Vendors() {
               },
             ]}
             rows={filteredVendors}
+            onRowClick={(row) => setDetailVendor(row)}
           />
         )}
       </Card>
       </>
+      )}
+      {detailVendor && (
+        <Modal
+          wide
+          title={detailVendor.name}
+          subtitle="Vendor details"
+          onClose={() => setDetailVendor(null)}
+          footer={
+            <div className="flex flex-wrap gap-2 justify-end">
+              <Button variant="secondary" onClick={() => { const v = detailVendor; setDetailVendor(null); setSelectedVendor(v); }}>View ledger</Button>
+              <Button onClick={() => { const v = detailVendor; setDetailVendor(null); startEdit(v); }}>Edit</Button>
+            </div>
+          }
+        >
+          <div className="space-y-5">
+            <div className="rounded-[22px] bg-surface-2 px-5 py-2">
+              <DetailRow label="Contact person">{detailVendor.contact_person || "—"}</DetailRow>
+              <DetailRow label="Phone">{detailVendor.phone || "—"}</DetailRow>
+              <DetailRow label="Payment terms">{detailVendor.payment_terms || "—"}</DetailRow>
+              <DetailRow label="Opening balance">Rs. {formatPKR(detailVendor.opening_balance || 0)}</DetailRow>
+              <DetailRow label="Balance owed">Rs. {formatPKR(balances[detailVendor.id] ?? 0)}</DetailRow>
+            </div>
+            <div>
+              <div className="text-[13px] font-bold text-forest mb-2">Items supplied</div>
+              {(detailVendor.item_ids || []).length === 0
+                ? <div className="text-sm text-text-muted">None linked.</div>
+                : <div className="flex flex-wrap gap-1">{detailVendor.item_ids.map((id) => <Badge key={id} tone="neutral">{itemLookup[id] || "?"}</Badge>)}</div>}
+            </div>
+            <div>
+              <div className="text-[13px] font-bold text-forest mb-2">Bank accounts</div>
+              {(detailVendor.bank_accounts || []).length === 0
+                ? <div className="text-sm text-text-muted">No bank accounts saved.</div>
+                : <div className="space-y-2">{detailVendor.bank_accounts.map((a, i) => (
+                    <div key={a.id ?? i} className="rounded-[20px] bg-surface-2 p-4 text-sm">
+                      <div className="font-semibold">{a.bank_name}</div>
+                      <div className="text-text-muted">{a.account_title}</div>
+                      <div className="font-mono">{a.account_number}</div>
+                    </div>
+                  ))}</div>}
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   );

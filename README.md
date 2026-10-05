@@ -647,3 +647,17 @@ FBR sales tax return — treat them as an operational dashboard, not filed accou
 - Purchase orders can be edited only with the new **Edit purchase orders** permission (admins always have it; grant it to a role in Settings → Accounts). Partially received POs are editable: received lines keep their item/rate and can't drop below the received quantity, the vendor is locked, new lines can be added.
 - Cancel is hidden (and refused by the server) once a PO is completed/fully received or fully paid.
 - Item and vendor pickers on the PO form are type-to-search dropdowns.
+
+## Phase 19 — partial payments on purchase orders
+
+- PO details panel → **Record payment**: enter a date, amount (up to the balance due) and method (cash / cheque / online, splittable). Repeat as often as needed (e.g. 300,000 on the 1st, 500,000 on the 10th). The PO flips to *paid* automatically when nothing is owed.
+- The panel lists every payment (advance + part-payments); a part-payment entered by mistake can be deleted (also removed from the vendor ledger).
+- API: `GET/POST /purchase-orders/{id}/payments`, `DELETE /purchase-orders/{id}/payments/{entry_id}`. "Mark paid" still pays the whole remaining balance in one go.
+
+## Phase 20 — GST, expense report, advance salary, payroll upgrades
+
+- **GST:** purchase orders and sales orders have a "GST" toggle + rate. GST orders carry a GST badge and a GST / Non-GST filter. PO totals, balance due and the vendor bill (on goods received) include the GST; the GST of a PO can't change once goods are received. A sales order's rate carries onto its invoice.
+- **Expense report** (Reports → Expense Report, with Excel download): every daily expense plus PO payments made in the date range, a total per day and a gross total, and two single freight lines (purchase orders / expenses) that are already included in the totals.
+- **Expense freight:** optional freight field on an expense; stored as part of the total and shown/reported separately.
+- **Advance Salary** page (HR & Payroll): record advances per employee, per-employee ledger of advances and payroll recoveries. New permission module "Advance Salary".
+- **Payroll:** each payslip has an editable "advance deducted" (the rest stays owed and is offered next month); automatic absence deduction (4 free absent days, then salary ÷ 30 per day, editable); payment method (cash / online / cheque) per employee. Finalizing posts salary expenses per cost-center and payment method; the cost recorded is the pay before advance recovery (the advance itself was never an expense).

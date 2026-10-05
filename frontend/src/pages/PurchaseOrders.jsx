@@ -25,6 +25,9 @@ export default function PurchaseOrders() {
   const [poNumber, setPoNumber] = useState("");
   const [vendorId, setVendorId] = useState("");
   const [notes, setNotes] = useState("");
+  const [gstOn, setGstOn] = useState(false);
+  const [gstRate, setGstRate] = useState("18");
+  const [gstFilter, setGstFilter] = useState("all");
   const [lines, setLines] = useState([emptyLine()]);
   const { canDo } = useAuth();
   const canDelete = canDo("delete_purchase_orders");
@@ -39,6 +42,7 @@ export default function PurchaseOrders() {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [paymentModalPo, setPaymentModalPo] = useState(null);
+  const [partPayPo, setPartPayPo] = useState(null);
   const [downloading, setDownloading] = useState(false);
 
   async function load() {
@@ -78,7 +82,7 @@ export default function PurchaseOrders() {
   }
 
   function resetForm() {
-    setPoNumber(generateDocNumber("PO")); setNotes(""); setLines([emptyLine()]);
+    setPoNumber(generateDocNumber("PO")); setNotes(""); setLines([emptyLine()]); setGstOn(false); setGstRate("18");
     setPayAdvance(false); setAdvanceAmount(""); setAdvanceDetail(emptyPaymentDetail());
     setVendorId(vendors[0]?.id || "");
   }
@@ -95,6 +99,7 @@ export default function PurchaseOrders() {
     setPoNumber(po.po_number);
     setVendorId(po.vendor_id);
     setNotes(po.notes || "");
+    setGstOn((po.gst_rate || 0) > 0); setGstRate(String(po.gst_rate > 0 ? po.gst_rate : 18));
     setLines(po.lines.map((l) => ({ id: l.id, item_id: l.item_id, quantity: l.quantity, rate: l.rate, received: l.received_quantity || 0 })));
     setShowForm(true);
   }
@@ -108,7 +113,11 @@ export default function PurchaseOrders() {
   function addLine() { setLines([...lines, emptyLine()]); }
   function removeLine(i) { setLines(lines.filter((_, idx) => idx !== i)); }
 
-  const total = lines.reduce((sum, l) => sum + (Number(l.quantity) || 0) * (Number(l.rate) || 0), 0);
+  const goodsSum = lines.reduce((sum, l) => sum + (Number(l.quantity) || 0) * (Number(l.rate) || 0), 0);
+  const gstPct = gstOn ? (Number(gstRate) || 0) : 0;
+  const gstSum = goodsSum * gstPct / 100;
+  const total = goodsSum + gstSum;   // goods + GST (freight is added later, when goods arrive)
+  const editingHasReceipts = !!editingId && lines.some((l) => l.received > 0);
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -118,6 +127,7 @@ export default function PurchaseOrders() {
         po_number: poNumber,
         vendor_id: Number(vendorId),
         notes,
+        gst_rate: gstPct,
         lines: lines
           .filter((l) => l.item_id && l.quantity && l.rate)
           .map((l) => ({ ...(l.id ? { id: l.id } : {}), item_id: Number(l.item_id), quantity: Number(l.quantity), rate: Number(l.rate) })),
@@ -197,6 +207,11 @@ export default function PurchaseOrders() {
     load();
   }
 
+  async function confirmPartPayment(payload) {
+    await api.addPOPayment(partPayPo.id, payload);
+    load();
+  }
+
   const vendorLookup = Object.fromEntries(vendors.map((v) => [v.id, v.name]));
 
   const filteredPos = pos.filter((po) => {
@@ -206,7 +221,8 @@ export default function PurchaseOrders() {
     const day = pktDay(po.order_date);   // same Pakistan-time day the Excel report uses
     const matchesFrom = !dateFrom || day >= dateFrom;
     const matchesTo = !dateTo || day <= dateTo;
-    return matchesSearch && matchesStatus && matchesFrom && matchesTo;
+    const matchesGst = gstFilter === "all" || (gstFilter === "gst" ? (po.gst_rate || 0) > 0 : !(po.gst_rate > 0));
+    return matchesSearch && matchesStatus && matchesFrom && matchesTo && matchesGst;
   });
 
   return (
@@ -230,6 +246,18 @@ export default function PurchaseOrders() {
                   hint={editingId && lines.some((l) => l.received > 0) ? "Goods are already received, so the vendor can't change." : undefined}
                   options={vendors.map((v) => ({ value: v.id, label: v.name }))} />
                 <Input label="Notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} />
+              </div>
+
+              <div className="rounded-[22px] bg-surface-2 p-4 space-y-3">
+                <label className={`flex items-center gap-3 text-sm font-bold text-forest min-h-[44px] ${editingHasReceipts ? "opacity-60" : "cursor-pointer"}`}>
+                  <input type="checkbox" className="w-5 h-5" checked={gstOn} disabled={editingHasReceipts} onChange={(e) => setGstOn(e.target.checked)} />
+                  GST purchase — GST is charged on this order
+                </label>
+                {gstOn && (
+                  <Input label="GST rate (%)" type="number" min="0" max="100" step="0.01" disabled={editingHasReceipts}
+                    value={gstRate} onChange={(e) => setGstRate(e.target.value)}
+                    hint={editingHasReceipts ? "Goods are already received, so the GST setting can't change." : "Added on top of the goods value; shown separately on the order and its bills."} />
+                )}
               </div>
 
               <div>
@@ -275,6 +303,7 @@ export default function PurchaseOrders() {
 
               <div className="flex items-center justify-between border-t border-border pt-4">
                 <div className="stencil text-sm text-text-muted">
+                  {gstSum > 0 && <span className="mr-3">Goods Rs. {formatPKR(goodsSum)} + GST Rs. {formatPKR(gstSum)} ·</span>}
                   Total: <span className="text-amber-soft">Rs. {formatPKR(total)}</span>
                 </div>
                 <div className="flex items-center gap-3">
@@ -293,10 +322,15 @@ export default function PurchaseOrders() {
           <option value="all">All statuses</option>
           {STATUSES.map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}
         </Select>
+        <Select label="GST" value={gstFilter} onChange={(e) => setGstFilter(e.target.value)} className="max-w-xs">
+          <option value="all">All orders</option>
+          <option value="gst">GST orders only</option>
+          <option value="non">Non-GST only</option>
+        </Select>
         <Input label="From date" type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
         <Input label="To date" type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
-        {(search || statusFilter !== "all" || dateFrom || dateTo) && (
-          <Button variant="ghost" onClick={() => { setSearch(""); setStatusFilter("all"); setDateFrom(""); setDateTo(""); }}>
+        {(search || statusFilter !== "all" || gstFilter !== "all" || dateFrom || dateTo) && (
+          <Button variant="ghost" onClick={() => { setSearch(""); setStatusFilter("all"); setGstFilter("all"); setDateFrom(""); setDateTo(""); }}>
             Clear filters
           </Button>
         )}
@@ -311,7 +345,9 @@ export default function PurchaseOrders() {
           onRowClick={(row) => setDetailPo(row)}
           emptyLabel={pos.length === 0 ? "No purchase orders yet." : "No purchase orders match your search/filter."}
           columns={[
-            { key: "po_number", label: "PO Number", mono: true },
+            { key: "po_number", label: "PO Number", mono: true, render: (row) => (
+              <span>{row.po_number}{(row.gst_rate || 0) > 0 && <span className="ml-2 align-middle"><Badge tone="amber">GST {row.gst_rate}%</Badge></span>}</span>
+            ) },
             { key: "vendor", label: "Vendor", render: (row) => vendorLookup[row.vendor_id] || "—" },
             { key: "order_date", label: "Date", render: (row) => new Date(row.order_date).toLocaleDateString() },
             {
@@ -321,11 +357,14 @@ export default function PurchaseOrders() {
               render: (row) => {
                 const goods = row.goods_total ?? row.lines.reduce((s, l) => s + l.quantity * l.rate, 0);
                 const freight = row.freight_charges || 0;
+                const gst = row.gst_amount || 0;
                 return (
                   <div className="leading-snug">
-                    <div className="font-bold">Rs. {formatPKR(goods + freight)}</div>
-                    {freight > 0 && (
-                      <div className="text-[11px] font-normal text-text-muted">Goods Rs. {formatPKR(goods)} + Freight Rs. {formatPKR(freight)}</div>
+                    <div className="font-bold">Rs. {formatPKR(goods + gst + freight)}</div>
+                    {(freight > 0 || gst > 0) && (
+                      <div className="text-[11px] font-normal text-text-muted">
+                        Goods Rs. {formatPKR(goods)}{gst > 0 && ` + GST Rs. ${formatPKR(gst)}`}{freight > 0 && ` + Freight Rs. ${formatPKR(freight)}`}
+                      </div>
                     )}
                   </div>
                 );
@@ -387,8 +426,12 @@ export default function PurchaseOrders() {
             vendor={vendors.find((v) => v.id === live.vendor_id)}
             items={items}
             onClose={() => setDetailPo(null)}
+            onChanged={load}
             actions={(
               <>
+                {!cancelled && live.payment_status !== "paid" && (live.balance_due || 0) > 0.01 && (
+                  <Button onClick={() => { setDetailPo(null); setPartPayPo(live); }}>Record payment</Button>
+                )}
                 {live.payment_status === "paid"
                   ? <Button variant="secondary" onClick={() => markUnpaid(live)}>Mark unpaid</Button>
                   : !cancelled && <Button variant="secondary" onClick={() => { setDetailPo(null); startPaying(live); }}>Mark paid</Button>}
@@ -399,6 +442,19 @@ export default function PurchaseOrders() {
           />
         );
       })()}
+
+      {partPayPo && (
+        <PaymentStatusModal
+          partial
+          title={`Record payment — ${partPayPo.po_number}`}
+          amountLabel="Balance due"
+          amount={partPayPo.balance_due}
+          direction="outgoing"
+          vendorBankAccounts={vendors.find((v) => v.id === partPayPo.vendor_id)?.bank_accounts || []}
+          onClose={() => setPartPayPo(null)}
+          onSubmit={confirmPartPayment}
+        />
+      )}
 
       {paymentModalPo && (
         <PaymentStatusModal

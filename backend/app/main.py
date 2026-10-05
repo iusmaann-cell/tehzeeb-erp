@@ -5,7 +5,7 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from . import models, file_storage, security
 from .database import engine, run_lightweight_migrations
-from .routers import vendors, items, warehouses, purchase_orders, grn, stock, production, customers, toll, distributors, sales, expenses, finance, employees, attendance, payroll, bi, settings, stock_adjustments, stock_transfers, admin, auth, accounts
+from .routers import vendors, items, warehouses, purchase_orders, grn, stock, production, customers, toll, distributors, sales, expenses, finance, employees, attendance, payroll, salary_advances, bi, settings, stock_adjustments, stock_transfers, admin, auth, accounts
 
 models.Base.metadata.create_all(bind=engine)
 run_lightweight_migrations()
@@ -60,6 +60,7 @@ app.include_router(finance.router)
 app.include_router(employees.router)
 app.include_router(attendance.router)
 app.include_router(payroll.router)
+app.include_router(salary_advances.router)
 app.include_router(bi.router)
 app.include_router(settings.router)
 app.include_router(stock_adjustments.router)

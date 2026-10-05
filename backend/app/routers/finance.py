@@ -1,9 +1,11 @@
 import datetime
-from fastapi import APIRouter, Depends
+import openpyxl
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from typing import List, Optional
-from .. import models, schemas
+from .. import models, schemas, reporting
+from ..security import current_user
 from ..database import get_db
 
 router = APIRouter(prefix="/reports", tags=["Finance Reports"])
@@ -293,3 +295,103 @@ def get_financial_snapshot(db: Session = Depends(get_db)):
         total_cogs_to_date=total_cogs,
         total_expenses_to_date=total_expenses,
     )
+
+
+# ---------------- Expense report (expenses + PO payments, by day) ----------------
+
+def _expense_report_data(db: Session, start: datetime.date, end: datetime.date):
+    """Everything paid out in the range, grouped by Pakistan-time day: daily expenses plus the
+    purchase-order payments (advances and part-payments) made that day. Freight is reported as
+    two separate single figures — PO freight and expense freight — that are already part of the
+    amounts above them, not extra money."""
+    lo, hi = reporting.range_bounds(start, end)
+    days = {}
+
+    def day(d):
+        return days.setdefault(d, {"date": d, "rows": [], "total": 0.0})
+
+    exp_freight = 0.0
+    for e in db.query(models.Expense).filter(models.Expense.expense_date >= lo, models.Expense.expense_date < hi).order_by(
+            models.Expense.expense_date, models.Expense.id).all():
+        d = day(reporting.pkt_date(e.expense_date))
+        method = getattr(e.payment_method, "value", e.payment_method)
+        d["rows"].append({
+            "type": "Expense", "reference": e.category.value.title(),
+            "description": e.description or "", "paid_via": (method or "—").title(),
+            "details": reporting.describe_payment(e) if method else "—", "amount": e.amount,
+            "freight": e.freight_charges or 0.0,
+        })
+        d["total"] += e.amount
+        exp_freight += e.freight_charges or 0.0
+
+    pos = {p.id: p for p in db.query(models.PurchaseOrder).all()}
+    vendors = {v.id: v.name for v in db.query(models.Vendor).all()}
+    for r in db.query(models.VendorLedgerEntry).filter(
+            models.VendorLedgerEntry.ref_type.in_(("PO_PAYMENT", "PO_ADVANCE")),
+            models.VendorLedgerEntry.direction == models.LedgerDirection.credit,
+            models.VendorLedgerEntry.entry_date >= lo, models.VendorLedgerEntry.entry_date < hi).order_by(
+            models.VendorLedgerEntry.entry_date, models.VendorLedgerEntry.id).all():
+        po = pos.get(r.ref_id)
+        d = day(reporting.pkt_date(r.entry_date))
+        method = getattr(r.payment_method, "value", r.payment_method)
+        d["rows"].append({
+            "type": "PO advance" if r.ref_type == "PO_ADVANCE" else "PO payment",
+            "reference": po.po_number if po else f"PO #{r.ref_id}",
+            "description": vendors.get(r.vendor_id, ""), "paid_via": (method or "—").title(),
+            "details": reporting.describe_payment(r, r.vendor_bank_account) if method else "—",
+            "amount": r.amount, "freight": 0.0,
+        })
+        d["total"] += r.amount
+
+    po_freight = sum(g.freight_amount or 0.0 for g in db.query(models.GRN).filter(
+        models.GRN.received_date >= lo, models.GRN.received_date < hi).all())
+
+    ordered = [days[k] for k in sorted(days)]
+    exp_total = sum(r["amount"] for d in ordered for r in d["rows"] if r["type"] == "Expense")
+    po_total = sum(r["amount"] for d in ordered for r in d["rows"] if r["type"] != "Expense")
+    return {
+        "start_date": start, "end_date": end, "days": ordered,
+        "expenses_total": exp_total, "po_payments_total": po_total, "gross_total": exp_total + po_total,
+        "freight_purchase_orders": po_freight, "freight_expenses": exp_freight,
+    }
+
+
+@router.get("/expense-report")
+def expense_report(start_date: datetime.date, end_date: datetime.date, db: Session = Depends(get_db)):
+    return _expense_report_data(db, start_date, end_date)
+
+
+@router.get("/expense-report/excel")
+def expense_report_excel(request: Request, start_date: datetime.date, end_date: datetime.date, db: Session = Depends(get_db)):
+    data = _expense_report_data(db, start_date, end_date)
+    user = current_user(request)
+    wb = openpyxl.Workbook()
+    columns = ["Date", "Type", "Reference", "Description / Vendor", "Paid Via", "Payment Details", "Amount (Rs.)"]
+    ws, r = reporting.new_sheet(
+        wb, "Expense Report", "Riwayat Oils and Fats — Expense Report",
+        [f"Period: {reporting.fmt_day(start_date)} to {reporting.fmt_day(end_date)}",
+         "Daily expenses together with purchase-order payments made in the period",
+         f"Generated {reporting.fmt_day(reporting.pkt_today())} by {user.full_name}"],
+        columns, [14, 13, 18, 34, 12, 40, 16])
+    n = len(columns)
+    if not data["days"]:
+        ws.cell(row=r, column=1, value="Nothing was paid out in this period.")
+        r += 2
+    for d in data["days"]:
+        for row in d["rows"]:
+            reporting.write_row(ws, r, [d["date"], row["type"], row["reference"], row["description"], row["paid_via"],
+                                        row["details"], row["amount"]], money_cols=(7,), wrap_cols=(4, 6))
+            ws.cell(row=r, column=1).number_format = "dd mmm yyyy"
+            r += 1
+        reporting.write_total_row(ws, r, f"Total for {reporting.fmt_day(d['date'])}", 1, {7: d["total"]}, n, reporting.DAY_FILL)
+        r += 2
+    reporting.write_total_row(ws, r, f"GROSS TOTAL  ({len(data['days'])} day{'s' if len(data['days']) != 1 else ''})", 1,
+                              {7: data["gross_total"]}, n, reporting.GROSS_FILL, border=reporting.TOP_DOUBLE)
+    r += 1
+    reporting.write_row(ws, r, ["", "", "", "of which: expenses", "", "", data["expenses_total"]], money_cols=(7,)); r += 1
+    reporting.write_row(ws, r, ["", "", "", "of which: purchase-order payments", "", "", data["po_payments_total"]], money_cols=(7,)); r += 2
+    ws.cell(row=r, column=1, value="Freight charges — shown separately; already included in the amounts above").font = reporting.BOLD
+    r += 1
+    reporting.write_row(ws, r, ["", "", "", "Freight charges — purchase orders (goods received in period)", "", "", data["freight_purchase_orders"]], money_cols=(7,), wrap_cols=(4,)); r += 1
+    reporting.write_row(ws, r, ["", "", "", "Freight charges — expenses", "", "", data["freight_expenses"]], money_cols=(7,))
+    return reporting.workbook_response(wb, f"expense_report_{start_date}_to_{end_date}.xlsx")

@@ -16,6 +16,10 @@ def _goods_total(po) -> float:
     return sum(l.quantity * l.rate for l in po.lines)
 
 
+def _gst_amount(po) -> float:
+    return _goods_total(po) * (po.gst_rate or 0.0) / 100.0
+
+
 def _paid_by_po(po_ids, db: Session) -> dict:
     """{po_id: money paid so far (advance + later payments)} from the vendor ledger."""
     if not po_ids:
@@ -40,14 +44,22 @@ def _decorate(pos, db: Session):
         goods = _goods_total(p)
         freight = p.freight_charges or 0.0
         p.goods_total = goods
-        p.total_value = goods + freight
+        p.gst_amount = _gst_amount(p)
+        p.total_value = goods + p.gst_amount + freight
         p.amount_paid = paid.get(p.id, 0.0)
         p.balance_due = max(p.total_value - p.amount_paid, 0.0)
     return pos
 
 
+def _clean_gst(rate) -> float:
+    rate = float(rate or 0.0)
+    if rate < 0 or rate > 100:
+        raise HTTPException(status_code=400, detail="GST rate must be between 0 and 100 percent")
+    return rate
+
+
 def _remaining_due(po, db: Session) -> float:
-    return max(_goods_total(po) + (po.freight_charges or 0.0) - _paid_by_po([po.id], db).get(po.id, 0.0), 0.0)
+    return max(_goods_total(po) + _gst_amount(po) + (po.freight_charges or 0.0) - _paid_by_po([po.id], db).get(po.id, 0.0), 0.0)
 
 
 @router.post("/", response_model=schemas.PurchaseOrderOut)
@@ -67,6 +79,7 @@ def create_purchase_order(po: schemas.PurchaseOrderCreate, db: Session = Depends
         status=models.POStatus.approved,
         advance_amount=0.0,
         freight_charges=0.0,
+        gst_rate=_clean_gst(po.gst_rate),
     )
     db.add(db_po)
     db.flush()  # get db_po.id before commit
@@ -87,7 +100,7 @@ def create_purchase_order(po: schemas.PurchaseOrderCreate, db: Session = Depends
 
     # Optional advance: posted as credits on the vendor's ledger right away.
     if po.advance_splits:
-        goods = _goods_total(db_po)
+        goods = _goods_total(db_po) + _gst_amount(db_po)
         advance = 0.0
         for split in po.advance_splits:
             _validate_split(split, po.vendor_id, db)
@@ -159,7 +172,8 @@ def purchase_order_report(request: Request, start_date: datetime.date = None, en
             payments_by_po.setdefault(pay.ref_id, []).append(pay)
 
     def po_total(p):
-        return sum(l.quantity * l.rate for l in p.lines)
+        g = sum(l.quantity * l.rate for l in p.lines)
+        return g * (1 + (p.gst_rate or 0.0) / 100.0)
 
     def pay_desc(pay):
         return reporting.describe_payment(pay, pay.vendor_bank_account)
@@ -297,6 +311,10 @@ def update_purchase_order(po_id: int, update: schemas.PurchaseOrderUpdate, db: S
 
     data = update.dict(exclude_unset=True)
     data.pop("lines", None)
+    if "gst_rate" in data:
+        data["gst_rate"] = _clean_gst(data["gst_rate"])
+        if has_receipts and abs(data["gst_rate"] - (po.gst_rate or 0.0)) > 1e-9:
+            raise HTTPException(status_code=400, detail="Goods are already received on this PO, so its GST setting can't be changed.")
     lines = update.lines if "lines" in update.model_fields_set else None
 
     if "vendor_id" in data:
@@ -355,7 +373,7 @@ def update_purchase_order(po_id: int, update: schemas.PurchaseOrderUpdate, db: S
     db.flush()
     db.refresh(po)
 
-    goods = _goods_total(po)
+    goods = _goods_total(po) + _gst_amount(po)
     if (po.advance_amount or 0) > goods + 0.01:
         db.rollback()
         raise HTTPException(
@@ -507,6 +525,89 @@ def update_po_payment_status(po_id: int, update: schemas.PaymentStatusUpdate, db
             db.delete(entry)
         po.payment_status = models.PaymentStatus.unpaid
 
+    db.commit()
+    db.refresh(po)
+    return _decorate(po, db)
+
+
+@router.get("/{po_id}/payments")
+def list_po_payments(po_id: int, db: Session = Depends(get_db)):
+    """Every payment made against this PO (advance + part-payments), oldest first."""
+    po = db.query(models.PurchaseOrder).filter(models.PurchaseOrder.id == po_id).first()
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    rows = db.query(models.VendorLedgerEntry).filter(
+        models.VendorLedgerEntry.ref_type.in_(PAID_REFS),
+        models.VendorLedgerEntry.ref_id == po.id,
+        models.VendorLedgerEntry.direction == models.LedgerDirection.credit,
+    ).order_by(models.VendorLedgerEntry.entry_date, models.VendorLedgerEntry.id).all()
+    return [{
+        "id": r.id, "kind": "advance" if r.ref_type == "PO_ADVANCE" else "payment",
+        "amount": r.amount, "entry_date": r.entry_date,
+        "payment_method": getattr(r.payment_method, "value", r.payment_method),
+        "notes": r.notes,
+    } for r in rows]
+
+
+@router.post("/{po_id}/payments", response_model=schemas.PurchaseOrderOut)
+def add_po_payment(po_id: int, body: schemas.POPaymentCreate, db: Session = Depends(get_db)):
+    """
+    Records a partial (or final) payment — e.g. 300,000 on the 1st, 500,000 on the 10th.
+    The total can be anything above zero up to what is still owed; once nothing is
+    owed the PO flips to paid by itself.
+    """
+    po = db.query(models.PurchaseOrder).filter(models.PurchaseOrder.id == po_id).first()
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    if po.status == models.POStatus.cancelled:
+        raise HTTPException(status_code=400, detail="A cancelled purchase order can't take payments.")
+    owed = _remaining_due(po, db)
+    if owed <= 0.01:
+        raise HTTPException(status_code=400, detail="Nothing is owed on this PO.")
+    if not body.splits:
+        raise HTTPException(status_code=400, detail="Enter the payment amount.")
+    for sp in body.splits:
+        if sp.amount <= 0:
+            raise HTTPException(status_code=400, detail="Payment amounts must be above zero.")
+        _validate_split(sp, po.vendor_id, db)
+    total = sum(sp.amount for sp in body.splits)
+    if total > owed + 0.01:
+        raise HTTPException(status_code=400, detail=f"This payment (Rs. {total:,.2f}) is more than the balance due (Rs. {owed:,.2f}).")
+    date = body.payment_date or datetime.datetime.utcnow()
+    for i, sp in enumerate(body.splits, start=1):
+        note = body.notes or f"Payment for {po.po_number}"
+        if len(body.splits) > 1:
+            note += f" (split {i}/{len(body.splits)})"
+        db.add(models.VendorLedgerEntry(
+            vendor_id=po.vendor_id, direction=models.LedgerDirection.credit, amount=sp.amount,
+            ref_type="PO_PAYMENT", ref_id=po.id, entry_date=date, notes=note,
+            payment_method=sp.payment_method, cheque_number=sp.cheque_number, cheque_bank=sp.cheque_bank,
+            our_bank=sp.our_bank, other_party_name=sp.other_party_name, other_party_bank=sp.other_party_bank,
+            vendor_bank_account_id=sp.vendor_bank_account_id,
+        ))
+    db.flush()
+    if _remaining_due(po, db) <= 0.01:
+        po.payment_status = models.PaymentStatus.paid
+    db.commit()
+    db.refresh(po)
+    return _decorate(po, db)
+
+
+@router.delete("/{po_id}/payments/{entry_id}", response_model=schemas.PurchaseOrderOut)
+def delete_po_payment(po_id: int, entry_id: int, db: Session = Depends(get_db)):
+    """Removes one recorded part-payment (e.g. entered by mistake). The advance can't be removed here."""
+    po = db.query(models.PurchaseOrder).filter(models.PurchaseOrder.id == po_id).first()
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    entry = db.query(models.VendorLedgerEntry).filter(
+        models.VendorLedgerEntry.id == entry_id, models.VendorLedgerEntry.ref_type == "PO_PAYMENT",
+        models.VendorLedgerEntry.ref_id == po.id).first()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    db.delete(entry)
+    db.flush()
+    if _remaining_due(po, db) > 0.01:
+        po.payment_status = models.PaymentStatus.unpaid
     db.commit()
     db.refresh(po)
     return _decorate(po, db)

@@ -214,6 +214,7 @@ class PurchaseOrder(Base):
     notes = Column(Text, nullable=True)
     advance_amount = Column(Float, default=0.0)    # paid up-front when the PO was raised (ledger: PO_ADVANCE)
     freight_charges = Column(Float, default=0.0)   # total freight across this PO's GRNs — kept apart from goods value
+    gst_rate = Column(Float, default=0.0)          # percent GST charged on the goods; 0 = not a GST purchase
 
     vendor = relationship("Vendor")
     lines = relationship("PurchaseOrderLine", back_populates="purchase_order", cascade="all, delete-orphan")
@@ -544,6 +545,7 @@ class SalesOrder(Base):
     order_date = Column(DateTime, default=datetime.datetime.utcnow)
     status = Column(Enum(SalesOrderStatus), default=SalesOrderStatus.approved)
     notes = Column(Text, nullable=True)
+    gst_rate = Column(Float, default=0.0)          # percent GST on this order; 0 = not a GST sale
 
     distributor = relationship("Distributor")
     lines = relationship("SalesOrderLine", back_populates="sales_order", cascade="all, delete-orphan")
@@ -690,7 +692,8 @@ class Expense(Base):
     expense_date = Column(DateTime, default=datetime.datetime.utcnow)
     category = Column(Enum(ExpenseCategory), nullable=False)
     plant = Column(Enum(Plant), nullable=True)   # optional cost-center attribution; null = general/admin
-    amount = Column(Float, nullable=False)
+    amount = Column(Float, nullable=False)       # total paid, freight included
+    freight_charges = Column(Float, default=0.0)  # the freight part of `amount` (optional, shown separately in reports)
     description = Column(String, nullable=True)
     notes = Column(Text, nullable=True)
 
@@ -768,10 +771,26 @@ class PayslipLine(Base):
     basic_pay = Column(Float, default=0.0)
     overtime_pay = Column(Float, default=0.0)
     allowances = Column(Float, default=0.0)   # editable before finalizing
-    deductions = Column(Float, default=0.0)   # editable before finalizing
+    deductions = Column(Float, default=0.0)   # editable before finalizing (starts as the automatic absence deduction)
+    advance_deduction = Column(Float, default=0.0)   # salary advance recovered in this run (may be less than owed)
+    payment_method = Column(String, default="cash")  # how this person's salary is paid: cash / online / cheque
     net_pay = Column(Float, default=0.0)
 
     payroll_run = relationship("PayrollRun", back_populates="lines")
+    employee = relationship("Employee")
+
+
+class SalaryAdvance(Base):
+    """Money handed to an employee ahead of payroll. What is still owed back is the sum of
+    advances minus the advance_deduction taken on finalized payslips."""
+    __tablename__ = "salary_advances"
+    id = Column(Integer, primary_key=True, index=True)
+    employee_id = Column(Integer, ForeignKey("employees.id"), nullable=False)
+    advance_date = Column(DateTime, default=datetime.datetime.utcnow)
+    amount = Column(Float, nullable=False)
+    payment_method = Column(String, default="cash")   # cash / online / cheque
+    notes = Column(String, nullable=True)
+
     employee = relationship("Employee")
 
 

@@ -79,6 +79,7 @@ export default function SalesInvoices() {
     if (so) {
       setDistributorId(so.distributor_id);
       setLines(so.lines.map((l) => ({ item_id: l.item_id, quantity: l.quantity, rate: l.rate })));
+      setTaxRate(String(so.gst_rate || 0));   // the order's GST setting carries over to its invoice
     }
   }
 

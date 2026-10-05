@@ -140,13 +140,14 @@ async def create_grn(
     else:
         po.status = models.POStatus.partially_received
 
+    gst_rate = po.gst_rate or 0.0
     ledger_entry = models.VendorLedgerEntry(
         vendor_id=po.vendor_id,
         direction=models.LedgerDirection.debit,
-        amount=total_bill_value,
+        amount=total_bill_value * (1 + gst_rate / 100.0),
         ref_type="GRN_BILL",
         ref_id=db_grn.id,
-        notes=f"Bill for GRN {grn.grn_number}",
+        notes=f"Bill for GRN {grn.grn_number}" + (f" (incl. {gst_rate:g}% GST)" if gst_rate else ""),
     )
     db.add(ledger_entry)
 

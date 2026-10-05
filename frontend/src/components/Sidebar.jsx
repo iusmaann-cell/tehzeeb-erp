@@ -37,6 +37,7 @@ export const NAV_SECTIONS = [
   { label: "HR & Payroll", icon: "users", items: [
     { key: "employees", label: "Employees" },
     { key: "attendance", label: "Attendance" },
+    { key: "salary-advances", label: "Advance Salary" },
     { key: "payroll", label: "Payroll" },
   ]},
   { label: "Settings", icon: "gear", items: [

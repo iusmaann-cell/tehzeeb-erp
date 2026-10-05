@@ -24,6 +24,7 @@ export const PAGE_MODULE = {
   reports: "reports",
   employees: "employees",
   attendance: "attendance",
+  "salary-advances": "salary_advances",
   payroll: "payroll",
   "invoice-settings": "invoice_settings",
   accounts: "__admin__",

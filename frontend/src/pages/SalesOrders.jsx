@@ -17,6 +17,9 @@ export default function SalesOrders() {
   const [soNumber, setSoNumber] = useState("");
   const [distributorId, setDistributorId] = useState("");
   const [notes, setNotes] = useState("");
+  const [gstOn, setGstOn] = useState(false);
+  const [gstRate, setGstRate] = useState("18");
+  const [gstFilter, setGstFilter] = useState("all");
   const [lines, setLines] = useState([emptyLine()]);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
@@ -40,7 +43,7 @@ export default function SalesOrders() {
   }
 
   function resetForm() {
-    setSoNumber(generateDocNumber("SO")); setNotes(""); setLines([emptyLine()]);
+    setSoNumber(generateDocNumber("SO")); setNotes(""); setLines([emptyLine()]); setGstOn(false); setGstRate("18");
     setDistributorId(distributors[0]?.id || "");
   }
 
@@ -55,6 +58,7 @@ export default function SalesOrders() {
     setSoNumber(so.so_number);
     setDistributorId(so.distributor_id);
     setNotes(so.notes || "");
+    setGstOn((so.gst_rate || 0) > 0); setGstRate(String(so.gst_rate > 0 ? so.gst_rate : 18));
     setLines(so.lines.map((l) => ({ item_id: l.item_id, quantity: l.quantity, rate: l.rate })));
     setShowForm(true);
   }
@@ -63,7 +67,10 @@ export default function SalesOrders() {
     const next = [...lines]; next[i] = { ...next[i], [field]: value }; setLines(next);
   }
 
-  const total = lines.reduce((sum, l) => sum + (Number(l.quantity) || 0) * (Number(l.rate) || 0), 0);
+  const goodsSum = lines.reduce((sum, l) => sum + (Number(l.quantity) || 0) * (Number(l.rate) || 0), 0);
+  const gstPct = gstOn ? (Number(gstRate) || 0) : 0;
+  const gstSum = goodsSum * gstPct / 100;
+  const total = goodsSum + gstSum;
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -73,6 +80,7 @@ export default function SalesOrders() {
         so_number: soNumber,
         distributor_id: Number(distributorId),
         notes,
+        gst_rate: gstPct,
         lines: lines.filter((l) => l.item_id && l.quantity && l.rate).map((l) => ({
           item_id: Number(l.item_id), quantity: Number(l.quantity), rate: Number(l.rate),
         })),
@@ -118,7 +126,8 @@ export default function SalesOrders() {
     const orderDate = new Date(so.order_date);
     const matchesFrom = !dateFrom || orderDate >= new Date(dateFrom);
     const matchesTo = !dateTo || orderDate <= new Date(`${dateTo}T23:59:59`);
-    return matchesSearch && matchesStatus && matchesDistributor && matchesFrom && matchesTo;
+    const matchesGst = gstFilter === "all" || (gstFilter === "gst" ? (so.gst_rate || 0) > 0 : !(so.gst_rate > 0));
+    return matchesSearch && matchesStatus && matchesDistributor && matchesFrom && matchesTo && matchesGst;
   });
 
   return (
@@ -143,6 +152,17 @@ export default function SalesOrders() {
                 <Input label="Notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} />
               </div>
 
+              <div className="rounded-[22px] bg-surface-2 p-4 space-y-3">
+                <label className="flex items-center gap-3 text-sm font-bold text-forest min-h-[44px] cursor-pointer">
+                  <input type="checkbox" className="w-5 h-5" checked={gstOn} onChange={(e) => setGstOn(e.target.checked)} />
+                  GST sale — GST is charged on this order
+                </label>
+                {gstOn && (
+                  <Input label="GST rate (%)" type="number" min="0" max="100" step="0.01" value={gstRate} onChange={(e) => setGstRate(e.target.value)}
+                    hint="Added on top of the goods value, and carried onto the invoice made from this order." />
+                )}
+              </div>
+
               <div>
                 <div className="text-xs text-text-muted mb-2">Line items (packed SKUs)</div>
                 <div className="space-y-2">
@@ -163,6 +183,7 @@ export default function SalesOrders() {
 
               <div className="flex items-center justify-between border-t border-border pt-4">
                 <div className="stencil text-sm text-text-muted">
+                  {gstSum > 0 && <span className="mr-3">Goods Rs. {formatPKR(goodsSum)} + GST Rs. {formatPKR(gstSum)} ·</span>}
                   Total: <span className="text-amber-soft">Rs. {formatPKR(total)}</span>
                 </div>
                 <div className="flex items-center gap-3">
@@ -185,10 +206,15 @@ export default function SalesOrders() {
           <option value="all">All distributors</option>
           {distributors.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
         </Select>
+        <Select label="GST" value={gstFilter} onChange={(e) => setGstFilter(e.target.value)} className="max-w-xs">
+          <option value="all">All orders</option>
+          <option value="gst">GST orders only</option>
+          <option value="non">Non-GST only</option>
+        </Select>
         <Input label="From date" type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
         <Input label="To date" type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
-        {(search || statusFilter !== "all" || distributorFilter !== "all" || dateFrom || dateTo) && (
-          <Button variant="ghost" onClick={() => { setSearch(""); setStatusFilter("all"); setDistributorFilter("all"); setDateFrom(""); setDateTo(""); }}>
+        {(search || statusFilter !== "all" || distributorFilter !== "all" || gstFilter !== "all" || dateFrom || dateTo) && (
+          <Button variant="ghost" onClick={() => { setSearch(""); setStatusFilter("all"); setDistributorFilter("all"); setGstFilter("all"); setDateFrom(""); setDateTo(""); }}>
             Clear filters
           </Button>
         )}
@@ -198,12 +224,23 @@ export default function SalesOrders() {
         <Table
           emptyLabel={sos.length === 0 ? "No sales orders yet." : "No sales orders match your search/filter."}
           columns={[
-            { key: "so_number", label: "SO Number", mono: true },
+            { key: "so_number", label: "SO Number", mono: true, render: (row) => (
+              <span>{row.so_number}{(row.gst_rate || 0) > 0 && <span className="ml-2 align-middle"><Badge tone="amber">GST {row.gst_rate}%</Badge></span>}</span>
+            ) },
             { key: "distributor", label: "Distributor", render: (row) => distributorLookup[row.distributor_id] || "—" },
             { key: "order_date", label: "Date", render: (row) => new Date(row.order_date).toLocaleDateString() },
             {
               key: "value", label: "Value", mono: true,
-              render: (row) => `Rs. ${formatPKR(row.lines.reduce((s, l) => s + l.quantity * l.rate, 0))}`,
+              render: (row) => {
+                const goods = row.lines.reduce((s, l) => s + l.quantity * l.rate, 0);
+                const gst = goods * (row.gst_rate || 0) / 100;
+                return (
+                  <div className="leading-snug">
+                    <div className="font-bold">Rs. {formatPKR(goods + gst)}</div>
+                    {gst > 0 && <div className="text-[11px] font-normal text-text-muted">Goods Rs. {formatPKR(goods)} + GST Rs. {formatPKR(gst)}</div>}
+                  </div>
+                );
+              },
             },
             { key: "status", label: "Status", render: (row) => <Badge tone={STATUS_TONES[row.status]}>{row.status.replace(/_/g, " ")}</Badge> },
             {

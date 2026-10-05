@@ -20,7 +20,9 @@ def create_sales_order(so: schemas.SalesOrderCreate, db: Session = Depends(get_d
     if existing:
         raise HTTPException(status_code=400, detail="SO number already exists")
 
-    db_so = models.SalesOrder(so_number=so.so_number, distributor_id=so.distributor_id, notes=so.notes)
+    if so.gst_rate < 0 or so.gst_rate > 100:
+        raise HTTPException(status_code=400, detail="GST rate must be between 0 and 100 percent")
+    db_so = models.SalesOrder(so_number=so.so_number, distributor_id=so.distributor_id, notes=so.notes, gst_rate=so.gst_rate)
     db.add(db_so)
     db.flush()
 

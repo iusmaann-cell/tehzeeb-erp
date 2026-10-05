@@ -214,6 +214,7 @@ class PurchaseOrderCreate(BaseModel):
     vendor_id: int
     notes: Optional[str] = None
     lines: List[POLineCreate]
+    gst_rate: float = 0.0   # percent; 0 = no GST
     # Optional advance paid to the vendor when the PO is raised. Reuses the payment-split
     # shape (method, cheque / bank details); one entry is normal, several are allowed.
     advance_splits: Optional[List[PaymentSplitLine]] = None
@@ -227,6 +228,7 @@ class PurchaseOrderUpdate(BaseModel):
     po_number: Optional[str] = None
     vendor_id: Optional[int] = None
     notes: Optional[str] = None
+    gst_rate: Optional[float] = None
     # If provided this is the PO's full list of lines. Lines that already have goods
     # received must be sent back with their id (see update_purchase_order for the rules).
     lines: Optional[List[POLineUpdate]] = None
@@ -243,6 +245,8 @@ class PurchaseOrderOut(BaseModel):
     lines: List[POLineOut]
     advance_amount: Optional[float] = 0.0
     freight_charges: Optional[float] = 0.0
+    gst_rate: Optional[float] = 0.0
+    gst_amount: float = 0.0
     # Computed per request (not stored): goods value, goods + freight, money paid so far
     # (advance + later payments) and what is still owed.
     goods_total: float = 0.0
@@ -251,6 +255,13 @@ class PurchaseOrderOut(BaseModel):
     balance_due: float = 0.0
     class Config:
         from_attributes = True
+
+
+class POPaymentCreate(BaseModel):
+    """One (part-)payment against a purchase order — any amount up to what is still owed."""
+    payment_date: Optional[datetime.datetime] = None
+    splits: List[PaymentSplitLine]
+    notes: Optional[str] = None
 
 
 class PaymentStatusUpdate(BaseModel):
@@ -672,6 +683,7 @@ class SalesOrderCreate(BaseModel):
     so_number: str
     distributor_id: int
     notes: Optional[str] = None
+    gst_rate: float = 0.0
     lines: List[SOLineCreate]
 
 
@@ -679,6 +691,7 @@ class SalesOrderUpdate(BaseModel):
     so_number: Optional[str] = None
     distributor_id: Optional[int] = None
     notes: Optional[str] = None
+    gst_rate: Optional[float] = None
     lines: Optional[List[SOLineCreate]] = None
 
 
@@ -689,6 +702,7 @@ class SalesOrderOut(BaseModel):
     order_date: datetime.datetime
     status: SalesOrderStatus
     notes: Optional[str] = None
+    gst_rate: Optional[float] = 0.0
     lines: List[SOLineOut]
     class Config:
         from_attributes = True
@@ -788,7 +802,8 @@ class ExpenseCreate(BaseModel):
     expense_date: Optional[datetime.datetime] = None
     category: ExpenseCategory
     plant: Optional[Plant] = None
-    amount: float
+    amount: float                      # total, freight included
+    freight_charges: float = 0.0       # optional freight part of the amount
     description: Optional[str] = None
     notes: Optional[str] = None
     payment_method: Optional[PaymentMethod] = None
@@ -804,6 +819,7 @@ class ExpenseUpdate(BaseModel):
     category: Optional[ExpenseCategory] = None
     plant: Optional[Plant] = None
     amount: Optional[float] = None
+    freight_charges: Optional[float] = None
     description: Optional[str] = None
     notes: Optional[str] = None
     payment_method: Optional[PaymentMethod] = None
@@ -820,6 +836,7 @@ class ExpenseOut(BaseModel):
     category: ExpenseCategory
     plant: Optional[Plant] = None
     amount: float
+    freight_charges: Optional[float] = 0.0
     description: Optional[str] = None
     notes: Optional[str] = None
     payment_method: Optional[PaymentMethod] = None
@@ -966,6 +983,8 @@ class PayrollRunUpdate(BaseModel):
 class PayslipLineUpdate(BaseModel):
     allowances: Optional[float] = None
     deductions: Optional[float] = None
+    advance_deduction: Optional[float] = None   # salary advance recovered this month (the rest stays owed)
+    payment_method: Optional[str] = None        # cash / online / cheque
 
 
 class PayslipLineOut(BaseModel):
@@ -980,6 +999,9 @@ class PayslipLineOut(BaseModel):
     overtime_pay: float
     allowances: float
     deductions: float
+    advance_deduction: Optional[float] = 0.0
+    payment_method: Optional[str] = "cash"
+    advance_balance: float = 0.0      # advance this employee still owes (computed)
     net_pay: float
     class Config:
         from_attributes = True

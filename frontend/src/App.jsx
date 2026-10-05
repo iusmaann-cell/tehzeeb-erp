@@ -27,6 +27,7 @@ import Reports from "./pages/Reports";
 import Employees from "./pages/Employees";
 import Attendance from "./pages/Attendance";
 import Payroll from "./pages/Payroll";
+import AdvanceSalary from "./pages/AdvanceSalary";
 import BIDashboard from "./pages/BIDashboard";
 import InvoiceSettings from "./pages/InvoiceSettings";
 import Accounts from "./pages/Accounts";
@@ -58,6 +59,7 @@ const PAGES = {
   reports: Reports,
   employees: Employees,
   attendance: Attendance,
+  "salary-advances": AdvanceSalary,
   payroll: Payroll,
   "bi-dashboard": BIDashboard,
   "invoice-settings": InvoiceSettings,

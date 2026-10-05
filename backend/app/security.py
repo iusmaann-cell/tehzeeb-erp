@@ -57,6 +57,7 @@ MODULES = [
     ("reports", "Financial Reports", "Finance", ["reports"]),
     ("employees", "Employees", "HR & Payroll", ["employees"]),
     ("attendance", "Attendance", "HR & Payroll", ["attendance"]),
+    ("salary_advances", "Advance Salary", "HR & Payroll", ["salary-advances"]),
     ("payroll", "Payroll", "HR & Payroll", ["payroll"]),
     ("invoice_settings", "Invoice Printing Settings", "Settings", ["settings"]),
 ]

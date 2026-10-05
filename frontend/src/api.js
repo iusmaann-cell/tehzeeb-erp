@@ -287,6 +287,17 @@ export const api = {
   deletePayrollRun: (id) => request(`/payroll/runs/${id}`, { method: "DELETE" }),
   finalizePayrollRun: (id) => request(`/payroll/runs/${id}/finalize`, { method: "PATCH" }),
 
+  // Salary advances
+  getSalaryAdvances: (employeeId) => request(`/salary-advances/${employeeId ? `?employee_id=${employeeId}` : ""}`),
+  addSalaryAdvance: (data) => request("/salary-advances/", { method: "POST", body: JSON.stringify(data) }),
+  updateSalaryAdvance: (id, data) => request(`/salary-advances/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteSalaryAdvance: (id) => request(`/salary-advances/${id}`, { method: "DELETE" }),
+  getAdvanceBalances: () => request("/salary-advances/balances"),
+  getAdvanceLedger: (employeeId) => request(`/salary-advances/ledger/${employeeId}`),
+
+  // Expense report (expenses + PO payments, by day)
+  getExpenseReport: (start, end) => request(`/reports/expense-report?start_date=${start}&end_date=${end}`),
+
   // BI Dashboards
   getRevenueTrend: (months = 6) => request(`/bi/revenue-trend?months=${months}`),
   getProductionYieldTrend: (params = {}) => {
@@ -304,6 +315,9 @@ export const api = {
   },
 
   // Payment status (POs, commission invoices, sales invoices)
+  getPOPayments: (id) => request(`/purchase-orders/${id}/payments`),
+  addPOPayment: (id, data) => request(`/purchase-orders/${id}/payments`, { method: "POST", body: JSON.stringify(data) }),
+  deletePOPayment: (id, entryId) => request(`/purchase-orders/${id}/payments/${entryId}`, { method: "DELETE" }),
   updatePOPaymentStatus: (id, data) => request(`/purchase-orders/${id}/payment-status`, { method: "PATCH", body: JSON.stringify(data) }),
   updateCommissionInvoicePaymentStatus: (id, data) => request(`/commission-invoices/${id}/payment-status`, { method: "PATCH", body: JSON.stringify(data) }),
   updateSalesInvoicePaymentStatus: (id, data) => request(`/sales-invoices/${id}/payment-status`, { method: "PATCH", body: JSON.stringify(data) }),

@@ -9,7 +9,7 @@ import BillPhotoUpload from "../components/BillPhotoUpload";
 const CATEGORIES = ["salaries", "utilities", "rent", "maintenance", "transport", "fuel", "admin", "other"];
 const PLANTS = ["refining", "hydrogenation", "soap", "packaging"];
 
-const emptyForm = { expense_date: "", category: "salaries", plant: "", amount: "", description: "", notes: "", ...emptyPaymentDetail() };
+const emptyForm = { expense_date: "", category: "salaries", plant: "", amount: "", freight_charges: "", description: "", notes: "", ...emptyPaymentDetail() };
 
 function receiptPreviewUrl(expense) {
   // Older records (before the Google Drive -> server-storage switch) only have
@@ -57,7 +57,8 @@ export default function Expenses() {
     setOriginalDay(pktDay(exp.expense_date));
     setForm({
       expense_date: pktDay(exp.expense_date),
-      category: exp.category, plant: exp.plant || "", amount: exp.amount, description: exp.description || "", notes: exp.notes || "",
+      category: exp.category, plant: exp.plant || "",
+      amount: Math.max((exp.amount || 0) - (exp.freight_charges || 0), 0), freight_charges: exp.freight_charges || "", description: exp.description || "", notes: exp.notes || "",
       payment_method: exp.payment_method || "cash", cheque_number: exp.cheque_number || "", cheque_bank: exp.cheque_bank || "",
       our_bank: exp.our_bank || "", other_party_name: exp.other_party_name || "", other_party_bank: exp.other_party_bank || "",
     });
@@ -73,7 +74,10 @@ export default function Expenses() {
     }
     try {
       const { expense_date, ...rest } = form;
-      const payload = { ...rest, plant: form.plant || null, amount: Number(form.amount) };
+      const base = Number(form.amount) || 0;
+      const freight = Number(form.freight_charges) || 0;
+      // The amount saved is the total paid; the freight part is recorded alongside so reports can show it separately.
+      const payload = { ...rest, plant: form.plant || null, amount: base + freight, freight_charges: freight };
       // Only administrators may pick a date; everyone else's expenses are dated today by the server.
       // Noon is sent so the chosen day can never slip across a timezone boundary.
       if (isAdmin && expense_date && expense_date !== originalDay) payload.expense_date = `${expense_date}T12:00:00`;
@@ -145,7 +149,9 @@ export default function Expenses() {
               <option value="">General / Admin</option>
               {PLANTS.map((p) => <option key={p} value={p}>{p}</option>)}
             </Select>
-            <Input label="Amount (Rs.)" type="number" required value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} />
+            <Input label="Amount (Rs.)" type="number" required min="0" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} />
+            <Input label="Freight charges (Rs., optional)" type="number" min="0" value={form.freight_charges} onChange={(e) => setForm({ ...form, freight_charges: e.target.value })}
+              hint={Number(form.freight_charges) > 0 ? `Total paid: Rs. ${formatPKR((Number(form.amount) || 0) + Number(form.freight_charges))} (freight is kept and reported separately)` : "Leave blank if there was no freight."} />
             <Input label="Description" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
             <div className="col-span-1 sm:col-span-2">
               <div className="text-xs text-text-muted mb-2">Payment method (how this expense was paid)</div>
@@ -184,7 +190,12 @@ export default function Expenses() {
             { key: "category", label: "Category", render: (row) => <Badge tone="amber">{row.category}</Badge> },
             { key: "plant", label: "Cost center", render: (row) => row.plant || "General/Admin" },
             { key: "description", label: "Description", render: (row) => row.description || "—" },
-            { key: "amount", label: "Amount", mono: true, render: (row) => `Rs. ${formatPKR(row.amount)}` },
+            { key: "amount", label: "Amount", mono: true, render: (row) => (
+              <div className="leading-snug">
+                <div>Rs. {formatPKR(row.amount)}</div>
+                {(row.freight_charges || 0) > 0 && <div className="text-[11px] font-normal text-text-muted">incl. freight Rs. {formatPKR(row.freight_charges)}</div>}
+              </div>
+            ) },
             { key: "payment", label: "Paid via", render: (row) => paymentMethodLabel(row) },
             {
               key: "bill", label: "Bill photo",

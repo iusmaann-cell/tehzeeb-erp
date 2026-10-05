@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
-import { Card, SectionTitle, Button, Input, Table, formatPKR } from "../components/ui";
+import { api, downloadFile, formatDay } from "../api";
+import { Card, SectionTitle, Button, Input, Table, Badge, formatPKR, notify } from "../components/ui";
 
 const TABS = [
   { key: "pnl", label: "P&L" },
+  { key: "expense-report", label: "Expense Report" },
   { key: "by-item", label: "P&L by SKU" },
   { key: "ap-aging", label: "AP Aging" },
   { key: "ar-aging", label: "AR Aging" },
@@ -49,6 +50,8 @@ export default function Reports() {
   const [arAgingToll, setArAgingToll] = useState([]);
   const [salesTax, setSalesTax] = useState(null);
   const [snapshot, setSnapshot] = useState(null);
+  const [expReport, setExpReport] = useState(null);
+  const [downloading, setDownloading] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const dateParams = { start_date: `${start}T00:00:00`, end_date: `${end}T23:59:59` };
@@ -57,6 +60,7 @@ export default function Reports() {
     setLoading(true);
     try {
       if (tab === "pnl") setPnl(await api.getPnL(dateParams));
+      if (tab === "expense-report") setExpReport(await api.getExpenseReport(start, end));
       if (tab === "by-item") setByItem(await api.getPnLByItem(dateParams));
       if (tab === "ap-aging") setApAging(await api.getAPAging());
       if (tab === "ar-aging") {
@@ -90,7 +94,7 @@ export default function Reports() {
         ))}
       </div>
 
-      {["pnl", "by-item", "sales-tax"].includes(tab) && (
+      {["pnl", "expense-report", "by-item", "sales-tax"].includes(tab) && (
         <div className="flex items-end gap-3 mb-4">
           <DateRangePicker start={start} end={end} setStart={setStart} setEnd={setEnd} />
           <Button variant="secondary" onClick={refresh}>Apply</Button>
@@ -112,6 +116,54 @@ export default function Reports() {
           <StatRow label="Expenses" value={pnl.total_expenses} tone="red" />
           <StatRow label="Net profit" value={pnl.net_profit} bold tone={pnl.net_profit >= 0 ? "green" : "red"} />
         </Card>
+      )}
+
+      {tab === "expense-report" && (
+        <div className="mb-4">
+          <Button variant="secondary" disabled={downloading} onClick={async () => {
+            setDownloading(true);
+            try { await downloadFile(`/reports/expense-report/excel?start_date=${start}&end_date=${end}`, `expense_report_${start}_to_${end}.xlsx`); }
+            catch (err) { notify(err.message, "error"); }
+            finally { setDownloading(false); }
+          }}>{downloading ? "Preparing…" : "⬇ Download Excel Report"}</Button>
+        </div>
+      )}
+
+      {!loading && tab === "expense-report" && expReport && (
+        <div className="space-y-4">
+          {expReport.days.length === 0 && <Card><div className="text-sm text-text-muted">Nothing was paid out in this period.</div></Card>}
+          {expReport.days.map((d) => (
+            <Card key={d.date}>
+              <div className="flex items-baseline justify-between mb-2">
+                <div className="font-bold text-forest">{formatDay(d.date)}</div>
+                <div className="stencil text-sm">Day total <span className="text-amber-soft font-bold">Rs. {formatPKR(d.total)}</span></div>
+              </div>
+              <div className="divide-y divide-border/60">
+                {d.rows.map((r, i) => (
+                  <div key={i} className="py-2 flex items-start justify-between gap-3 text-sm">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge tone={r.type === "Expense" ? "amber" : "neutral"}>{r.type}</Badge>
+                        <span className="font-semibold">{r.reference}</span>
+                        {r.description && <span className="text-text-muted">· {r.description}</span>}
+                      </div>
+                      <div className="text-xs text-text-muted mt-0.5">{r.paid_via}{r.freight > 0 ? ` · incl. freight Rs. ${formatPKR(r.freight)}` : ""}</div>
+                    </div>
+                    <div className="stencil font-bold whitespace-nowrap">Rs. {formatPKR(r.amount)}</div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          ))}
+          <Card className="max-w-lg">
+            <StatRow label="Expenses" value={expReport.expenses_total} />
+            <StatRow label="Purchase-order payments" value={expReport.po_payments_total} />
+            <StatRow label="Gross total" value={expReport.gross_total} bold tone="red" />
+            <div className="text-xs text-text-muted uppercase tracking-wide mt-4 mb-1">Freight charges (already inside the totals above)</div>
+            <StatRow label="Freight — purchase orders" value={expReport.freight_purchase_orders} />
+            <StatRow label="Freight — expenses" value={expReport.freight_expenses} />
+          </Card>
+        </div>
       )}
 
       {!loading && tab === "by-item" && (

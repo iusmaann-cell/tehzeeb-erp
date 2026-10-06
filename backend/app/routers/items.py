@@ -6,8 +6,10 @@ from typing import List
 import io
 import datetime
 import openpyxl
-from .. import models, schemas
+from fastapi import Request
+from .. import models, schemas, reporting
 from ..database import get_db
+from ..security import current_user
 
 router = APIRouter(tags=["Items & UOM"])
 
@@ -240,6 +242,47 @@ def list_items(item_type: str = None, db: Session = Depends(get_db)):
     if item_type:
         query = query.filter(models.Item.item_type == item_type)
     return query.all()
+
+
+def _item_list_data(db: Session):
+    """Every active item with its unit and the owned stock on hand (toll customers' material excluded)."""
+    from sqlalchemy import func
+    on_hand = {r.item_id: r.q for r in db.query(
+        models.StockLedgerEntry.item_id, func.sum(models.StockLedgerEntry.quantity).label("q")
+    ).filter(models.StockLedgerEntry.is_toll_stock == 0).group_by(models.StockLedgerEntry.item_id).all()}
+    out = []
+    for it in db.query(models.Item).filter(models.Item.is_active == 1).order_by(models.Item.item_type, models.Item.name).all():
+        out.append({
+            "code": it.code, "name": it.name, "item_type": it.item_type.value,
+            "unit": it.uom.symbol if it.uom else "", "pack_size": it.pack_size or "",
+            "units_per_case": it.units_per_case, "reorder_level": it.reorder_level,
+            "on_hand": round(on_hand.get(it.id, 0.0) or 0.0, 3),
+        })
+    return out
+
+
+@router.get("/items/report")
+def items_report(db: Session = Depends(get_db)):
+    return _item_list_data(db)
+
+
+@router.get("/items/report/excel")
+def items_report_excel(request: Request, db: Session = Depends(get_db)):
+    rows = _item_list_data(db)
+    user = current_user(request)
+    wb = openpyxl.Workbook()
+    columns = ["Code", "Item", "Type", "Unit", "Pack size", "Units / case", "Reorder level", "On hand (owned)", "Low?"]
+    ws, r = reporting.new_sheet(
+        wb, "Items", "Riwayat Oils and Fats — Item List",
+        [f"{len(rows)} active items", f"Generated {reporting.fmt_day(reporting.pkt_today())} by {user.full_name}"],
+        columns, [14, 34, 16, 9, 11, 12, 14, 16, 8])
+    for row in rows:
+        low = row["reorder_level"] is not None and row["on_hand"] <= row["reorder_level"]
+        reporting.write_row(ws, r, [row["code"], row["name"], row["item_type"].replace("_", " ").title(), row["unit"],
+                                    row["pack_size"], row["units_per_case"], row["reorder_level"], row["on_hand"],
+                                    "LOW" if low else ""], qty_cols=(6, 7, 8))
+        r += 1
+    return reporting.workbook_response(wb, f"item_list_{reporting.pkt_today()}.xlsx")
 
 
 # ---- Bulk upload (Excel) — MUST come before /items/{item_id} routes, since a

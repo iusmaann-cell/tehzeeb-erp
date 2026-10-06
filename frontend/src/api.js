@@ -111,6 +111,8 @@ export const api = {
   },
 
   // Items
+  getItemListReport: () => request("/items/report"),
+  getStockReport: () => request("/stock/report"),
   getItems: (itemType) => request(`/items/${itemType ? `?item_type=${itemType}` : ""}`),
   createItem: (data) => request("/items/", { method: "POST", body: JSON.stringify(data) }),
   bulkUploadItems: async (file) => {

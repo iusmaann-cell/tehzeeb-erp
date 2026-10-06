@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
-import { Card, SectionTitle, Table, Badge, Button, Input, formatPKR } from "../components/ui";
+import { api, downloadFile, pktToday } from "../api";
+import { printReport } from "../printReport";
+import { Card, SectionTitle, Table, Badge, Button, Input, formatPKR, notify } from "../components/ui";
 
 function WarehouseCard({ wh, onClick }) {
   return (
@@ -54,6 +55,7 @@ export default function Stock() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState(null);
   const [searching, setSearching] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   async function loadWarehouses() {
     setLoading(true);
@@ -85,9 +87,60 @@ export default function Stock() {
     setSearchResults(null);
   }
 
+  async function handleDownloadReport() {
+    setBusy(true);
+    try { await downloadFile("/stock/report/excel", `stock_report_${pktToday()}.xlsx`); }
+    catch (err) { notify(err.message, "error"); }
+    finally { setBusy(false); }
+  }
+
+  async function handlePrintReport() {
+    setBusy(true);
+    try {
+      const [data, settings] = await Promise.all([api.getStockReport(), api.getInvoiceSettings().catch(() => null)]);
+      printReport(settings, {
+        title: "Full Stock Report",
+        subtitle: `All warehouses and tanks · as of ${new Date().toLocaleDateString()} · owned stock value Rs. ${formatPKR(data.total_owned_value)}`,
+        sections: [
+          ...data.warehouses.map((w) => ({
+            heading: `${w.name} — ${w.type.replace(/_/g, " ")}${w.capacity ? ` (capacity ${w.capacity})` : ""}`,
+            columns: [
+              { label: "Item" }, { label: "Batch" }, { label: "Quantity", align: "right" }, { label: "Unit" },
+              { label: "Ownership" }, { label: "Value (Rs.)", align: "right" },
+            ],
+            rows: w.rows.map((r) => [r.item_name, r.batch_no || "—", r.quantity, r.unit,
+              r.ownership === "Toll" ? `Toll — ${r.toll_customer || "customer"}` : "Owned",
+              r.ownership === "Owned" ? formatPKR(r.value) : "—"]),
+            empty: "Empty",
+            footer: `Owned stock value: Rs. ${formatPKR(w.owned_value)}`,
+          })),
+          {
+            heading: "Totals by item (all warehouses)",
+            columns: [{ label: "Item" }, { label: "Owned qty", align: "right" }, { label: "Toll qty", align: "right" }, { label: "Unit" }, { label: "Owned value (Rs.)", align: "right" }],
+            rows: data.item_totals.map((t) => [t.item_name, t.owned_qty, t.toll_qty || "—", t.unit, formatPKR(t.owned_value)]),
+            footer: `Total owned stock value: Rs. ${formatPKR(data.total_owned_value)}`,
+          },
+        ],
+      });
+    } catch (err) {
+      notify(err.message, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div>
-      <SectionTitle eyebrow="Inventory" title="Stock" />
+      <SectionTitle
+        eyebrow="Inventory"
+        title="Stock"
+        action={
+          <div className="flex gap-2 flex-wrap">
+            <Button variant="secondary" onClick={handlePrintReport} disabled={busy}>🖨 Print full report</Button>
+            <Button onClick={handleDownloadReport} disabled={busy}>⬇ Full stock report (Excel)</Button>
+          </div>
+        }
+      />
 
       <Card className="mb-6">
         <form onSubmit={handleSearch} className="flex items-end gap-3">

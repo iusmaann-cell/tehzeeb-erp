@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { api, downloadFile } from "../api";
+import { api, downloadFile, pktToday } from "../api";
+import { printReport } from "../printReport";
 import { Card, SectionTitle, Button, Input, Select, Table, Badge, RowActions, FormPanel, confirmDialog, notify } from "../components/ui";
 
 const ITEM_TYPES = [
@@ -15,6 +16,7 @@ const emptyForm = { code: "", name: "", item_type: "crude_oil", uom_id: "", reor
 const emptyUomForm = { name: "", symbol: "" };
 
 export default function Items() {
+  const [busy, setBusy] = useState(false);
   const [items, setItems] = useState([]);
   const [uoms, setUoms] = useState([]);
   const [showForm, setShowForm] = useState(false);
@@ -177,6 +179,41 @@ export default function Items() {
     return matchesSearch && matchesType && matchesUom;
   });
 
+  async function handlePrintList() {
+    setBusy(true);
+    try {
+      const [rows, settings] = await Promise.all([api.getItemListReport(), api.getInvoiceSettings().catch(() => null)]);
+      printReport(settings, {
+        title: "Item List",
+        subtitle: `${rows.length} active items · ${new Date().toLocaleDateString()}`,
+        sections: [{
+          columns: [
+            { label: "Code" }, { label: "Item" }, { label: "Type" }, { label: "Unit" }, { label: "Pack" },
+            { label: "Reorder at", align: "right" }, { label: "On hand", align: "right" },
+          ],
+          rows: rows.map((r) => [r.code, r.name, r.item_type.replace(/_/g, " "), r.unit, r.pack_size || "—",
+            r.reorder_level ?? "—", r.on_hand]),
+          empty: "No items yet.",
+        }],
+      });
+    } catch (err) {
+      notify(err.message, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDownloadList() {
+    setBusy(true);
+    try {
+      await downloadFile("/items/report/excel", `item_list_${pktToday()}.xlsx`);
+    } catch (err) {
+      notify(err.message, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div>
       <SectionTitle
@@ -184,6 +221,8 @@ export default function Items() {
         title="Items"
         action={
           <div className="flex gap-2 flex-wrap">
+            <Button variant="secondary" onClick={handlePrintList} disabled={busy}>🖨 Print list</Button>
+            <Button variant="secondary" onClick={handleDownloadList} disabled={busy}>⬇ Download list</Button>
             <Button variant="ghost" onClick={handlePurgeItems}>Purge Deleted Items</Button>
             <Button variant="secondary" onClick={() => setShowUomSection((s) => !s)}>
               {showUomSection ? "Hide Units" : "Manage Units"}

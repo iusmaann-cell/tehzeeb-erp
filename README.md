@@ -661,3 +661,8 @@ FBR sales tax return — treat them as an operational dashboard, not filed accou
 - **Expense freight:** optional freight field on an expense; stored as part of the total and shown/reported separately.
 - **Advance Salary** page (HR & Payroll): record advances per employee, per-employee ledger of advances and payroll recoveries. New permission module "Advance Salary".
 - **Payroll:** each payslip has an editable "advance deducted" (the rest stays owed and is offered next month); automatic absence deduction (4 free absent days, then salary ÷ 30 per day, editable); payment method (cash / online / cheque) per employee. Finalizing posts salary expenses per cost-center and payment method; the cost recorded is the pay before advance recovery (the advance itself was never an expense).
+
+## Phase 21 — item list and full stock report
+
+- **Items:** "Print list" (print-ready page, can be saved as PDF) and "Download list" (Excel) — all active items with type, unit, pack size, reorder level and owned stock on hand (low items flagged in Excel).
+- **Stock:** "Print full report" and "Full stock report (Excel)" — every warehouse / tank with each batch, quantity, ownership (owned vs. toll customer) and value, a value subtotal per warehouse, totals by item across all warehouses, and the total value of owned stock. Empty tanks are listed too.

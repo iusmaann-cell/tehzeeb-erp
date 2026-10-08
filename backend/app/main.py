@@ -10,6 +10,8 @@ from .routers import vendors, items, warehouses, purchase_orders, grn, stock, pr
 models.Base.metadata.create_all(bind=engine)
 run_lightweight_migrations()
 security.ensure_admin_bootstrap()
+from . import one_time_cleanup
+one_time_cleanup.run()
 
 app = FastAPI(
     title="Riwayat Oils and Fats ERP",

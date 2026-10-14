@@ -336,7 +336,7 @@ def _expense_report_data(db: Session, start: datetime.date, end: datetime.date):
         method = getattr(r.payment_method, "value", r.payment_method)
         d["rows"].append({
             "type": "PO advance" if r.ref_type == "PO_ADVANCE" else "PO payment",
-            "reference": po.po_number if po else f"PO #{r.ref_id}",
+            "reference": po.po_number if po else f"PO #{r.ref_id} (deleted)",
             "description": vendors.get(r.vendor_id, ""), "paid_via": (method or "—").title(),
             "details": reporting.describe_payment(r, r.vendor_bank_account) if method else "—",
             "amount": r.amount, "freight": 0.0,

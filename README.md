@@ -666,3 +666,9 @@ FBR sales tax return — treat them as an operational dashboard, not filed accou
 
 - **Items:** "Print list" (print-ready page, can be saved as PDF) and "Download list" (Excel) — all active items with type, unit, pack size, reorder level and owned stock on hand (low items flagged in Excel).
 - **Stock:** "Print full report" and "Full stock report (Excel)" — every warehouse / tank with each batch, quantity, ownership (owned vs. toll customer) and value, a value subtotal per warehouse, totals by item across all warehouses, and the total value of owned stock. Empty tanks are listed too.
+
+## Phase 22 — one-off PO purge (temporary)
+
+`backend/app/one_time_cleanup.py` removes one purchase order completely (its GRNs, the stock they added, and its vendor-ledger entries) **only when** the env var `PURGE_PO_NUMBER` is set. `PURGE_PO_DRY_RUN` defaults to dry-run (prints a "[purge]" report to the deploy logs); set it to `0` to delete. It refuses if the received stock was already used or moved, and writes a JSON backup to `uploads/purge_backups/` first. Remove both variables afterwards (and this file in a later release).
+
+Purchase orders that already have goods received cannot be deleted — the server refuses and the Delete button is hidden; cancel them instead.

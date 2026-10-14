@@ -27,7 +27,45 @@ def _row(obj):
     return out
 
 
+def purge_orphan_payments():
+    """PURGE_ORPHAN_PO_ID=<id>: remove advance/payment ledger entries whose purchase order no longer exists.
+    Refuses if a PO with that id still exists. Dry run unless PURGE_PO_DRY_RUN=0. Backs up first."""
+    raw = (os.getenv("PURGE_ORPHAN_PO_ID") or "").strip()
+    if not raw.isdigit():
+        return
+    po_id = int(raw)
+    dry = os.getenv("PURGE_PO_DRY_RUN", "1") != "0"
+    db = SessionLocal()
+    try:
+        if db.query(models.PurchaseOrder).filter(models.PurchaseOrder.id == po_id).first():
+            print(f"[purge] orphan check: PO id {po_id} still exists — refusing, nothing changed")
+            return
+        rows = db.query(models.VendorLedgerEntry).filter(
+            models.VendorLedgerEntry.ref_type.in_(("PO_ADVANCE", "PO_PAYMENT")),
+            models.VendorLedgerEntry.ref_id == po_id).all()
+        print(f"[purge] {'DRY RUN — ' if dry else ''}orphan entries for deleted PO id {po_id}: "
+              f"{[(e.id, e.ref_type, e.vendor_id, e.amount, str(e.entry_date)[:10]) for e in rows]}")
+        if not rows or dry:
+            print("[purge]   nothing deleted." if dry else "[purge]   nothing to delete.")
+            return
+        folder = pathlib.Path(file_storage.UPLOADS_DIR) / "purge_backups"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"orphan_PO{po_id}_{datetime.datetime.utcnow():%Y%m%d_%H%M%S}.json"
+        path.write_text(json.dumps({"vendor_ledger": [_row(e) for e in rows]}, indent=2, default=str))
+        print(f"[purge]   backup written: {path}")
+        for e in rows:
+            db.delete(e)
+        db.commit()
+        print(f"[purge]   DONE — {len(rows)} orphan entr{'y' if len(rows) == 1 else 'ies'} removed.")
+    except Exception as e:
+        db.rollback()
+        print(f"[purge]   FAILED, nothing changed: {e}")
+    finally:
+        db.close()
+
+
 def run():
+    purge_orphan_payments()
     po_number = (os.getenv("PURGE_PO_NUMBER") or "").strip()
     if not po_number:
         return

@@ -63,7 +63,8 @@ def update_sales_order(so_id: int, update: schemas.SalesOrderUpdate, db: Session
         )
 
     data = update.dict(exclude_unset=True)
-    lines = data.pop("lines", None)
+    lines = update.lines if "lines" in data else None
+    data.pop("lines", None)
 
     if "distributor_id" in data:
         distributor = db.query(models.Distributor).filter(models.Distributor.id == data["distributor_id"]).first()

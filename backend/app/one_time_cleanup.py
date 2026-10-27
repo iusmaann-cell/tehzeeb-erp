@@ -64,7 +64,94 @@ def purge_orphan_payments():
         db.close()
 
 
+def relink_batches():
+    """RELINK_ITEM_NAME + RELINK_BATCHES (comma separated): stock batches whose item was deleted are
+    moved onto an active item of that name (created if it doesn't exist, copying the old item's type,
+    unit and pack details). Every row that carries one of those batch numbers for the old item is moved.
+    Refuses if a batch belongs to an item that is still active. Dry run unless PURGE_PO_DRY_RUN=0."""
+    name = (os.getenv("RELINK_ITEM_NAME") or "").strip()
+    batches = [b.strip() for b in (os.getenv("RELINK_BATCHES") or "").split(",") if b.strip()]
+    if not name or not batches:
+        return
+    dry = os.getenv("PURGE_PO_DRY_RUN", "1") != "0"
+    db = SessionLocal()
+    try:
+        entries = db.query(models.StockLedgerEntry).filter(models.StockLedgerEntry.batch_no.in_(batches)).all()
+        print(f"[purge] {'DRY RUN — ' if dry else ''}relink batches {batches} to item '{name}'")
+        if not entries:
+            print("[purge]   no stock entries carry those batch numbers — nothing to do")
+            return
+        old_ids = sorted({e.item_id for e in entries})
+        old_items = {i.id: i for i in db.query(models.Item).filter(models.Item.id.in_(old_ids)).all()}
+        for oid in old_ids:
+            it = old_items.get(oid)
+            net = {}
+            for e in entries:
+                if e.item_id == oid:
+                    k = (e.batch_no, e.warehouse_id)
+                    net[k] = net.get(k, 0.0) + e.quantity
+            print(f"[purge]   current item id {oid}: name={getattr(it, 'name', '?')!r} code={getattr(it, 'code', '?')!r} "
+                  f"active={getattr(it, 'is_active', '?')} | batch/warehouse net qty: {net}")
+        active_old = [oid for oid in old_ids if old_items.get(oid) and old_items[oid].is_active]
+        if active_old:
+            print(f"[purge]   ABORTED — these batches belong to an item that is still active (ids {active_old}); nothing changed")
+            return
+        target = db.query(models.Item).filter(
+            models.Item.is_active == 1, models.Item.name.ilike(name)).first()
+        template = old_items.get(old_ids[0])
+        if target:
+            print(f"[purge]   will use the existing active item id {target.id} ({target.code})")
+        else:
+            print(f"[purge]   will create a new item '{name}' "
+                  f"(type/unit/pack copied from deleted item id {template.id if template else '?'})")
+        tables = [t for t in models.Base.metadata.tables.values()
+                  if "item_id" in t.columns and "batch_no" in t.columns]
+        counts = {}
+        for t in tables:
+            n = db.execute(t.select().where(t.c.batch_no.in_(batches), t.c.item_id.in_(old_ids))).fetchall()
+            if n:
+                counts[t.name] = len(n)
+        print(f"[purge]   rows that will move to the new item: {counts}")
+        if dry:
+            print("[purge]   dry run only — nothing changed. Set PURGE_PO_DRY_RUN=0 to apply.")
+            return
+        if not target:
+            base = "".join(ch for ch in name.upper() if ch.isalnum())[:20] or "ITEM"
+            code, n = base, 1
+            while db.query(models.Item).filter(models.Item.code == code).first():
+                n += 1
+                code = f"{base}-{n}"
+            target = models.Item(
+                code=code, name=name,
+                item_type=template.item_type if template else models.ItemType.packaging,
+                uom_id=template.uom_id if template else db.query(models.UnitOfMeasure).first().id,
+                reorder_level=getattr(template, "reorder_level", None), pack_size=getattr(template, "pack_size", None),
+                units_per_case=getattr(template, "units_per_case", None),
+                density_kg_per_liter=getattr(template, "density_kg_per_liter", None), is_active=1)
+            db.add(target)
+            db.flush()
+        backup = {"target_item_id": target.id, "old_item_ids": old_ids, "moved": {}}
+        for t in tables:
+            rows = db.execute(t.select().where(t.c.batch_no.in_(batches), t.c.item_id.in_(old_ids))).fetchall()
+            if rows:
+                backup["moved"][t.name] = [{"id": r._mapping["id"], "old_item_id": r._mapping["item_id"]} for r in rows]
+                db.execute(t.update().where(t.c.batch_no.in_(batches), t.c.item_id.in_(old_ids)).values(item_id=target.id))
+        folder = pathlib.Path(file_storage.UPLOADS_DIR) / "purge_backups"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"relink_{datetime.datetime.utcnow():%Y%m%d_%H%M%S}.json"
+        path.write_text(json.dumps(backup, indent=2, default=str))
+        db.commit()
+        print(f"[purge]   backup written: {path}")
+        print(f"[purge]   DONE — batches {batches} now belong to item id {target.id} '{target.name}' ({target.code}).")
+    except Exception as e:
+        db.rollback()
+        print(f"[purge]   FAILED, nothing changed: {e}")
+    finally:
+        db.close()
+
+
 def run():
+    relink_batches()
     purge_orphan_payments()
     po_number = (os.getenv("PURGE_PO_NUMBER") or "").strip()
     if not po_number:

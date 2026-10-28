@@ -198,7 +198,205 @@ def purge_sales_invoices():
         db.close()
 
 
+def _parse_lots(text):
+    """'9920@26,8575@26,12425>9750@26' -> [(old_qty, new_qty, rate)]  ('old>new' changes the quantity too)."""
+    lots = []
+    for part in [x.strip() for x in text.split(",") if x.strip()]:
+        qty_txt, _, rate_txt = part.partition("@")
+        old_txt, _, new_txt = qty_txt.partition(">")
+        old = float(old_txt)
+        lots.append((old, float(new_txt) if new_txt else old, float(rate_txt)))
+    return lots
+
+
+def correct_po_rate():
+    """PO_RATE_FIX="<PO number>=<rate>"  (one rate for every receiving) or
+       PO_RATE_FIX="<PO number>=<qty>@<rate>,<qty>@<rate>,<old qty>><new qty>@<rate>,..."  (one entry per receiving,
+       matched to the existing receivings by their current quantity; 'old>new' also corrects the quantity).
+    Keeps the PO, its receivings and stock and corrects rate/quantity everywhere they were copied: goods-received
+    lines, stock-in entries, vendor bills (GRN_BILL, GST included), the PO line (received qty, average rate) and the
+    production orders that already used this stock (input cost, output unit cost, output stock rate).
+    Payments and freight are untouched. Refuses (changes nothing) if a corrected stock batch would go negative or a
+    production output was used again. Dry run unless PURGE_PO_DRY_RUN=0; JSON backup of every old value first."""
+    spec = (os.getenv("PO_RATE_FIX") or "").strip()
+    if not spec or "=" not in spec:
+        return
+    po_number, _, rest = spec.partition("=")
+    po_number = po_number.strip()
+    dry = os.getenv("PURGE_PO_DRY_RUN", "1") != "0"
+    db = SessionLocal()
+    try:
+        po = db.query(models.PurchaseOrder).filter(models.PurchaseOrder.po_number == po_number).first()
+        if not po:
+            print(f"[purge] {po_number}: not found")
+            return
+        gst = po.gst_rate or 0.0
+        grns = db.query(models.GRN).filter(models.GRN.purchase_order_id == po.id).all()
+        grn_ids = [g.id for g in grns]
+        grn_no = {g.id: g.grn_number for g in grns}
+        grn_lines = db.query(models.GRNLine).filter(models.GRNLine.grn_id.in_(grn_ids)).order_by(models.GRNLine.id).all() if grn_ids else []
+        stock_in = db.query(models.StockLedgerEntry).filter(
+            models.StockLedgerEntry.ref_type == "GRN", models.StockLedgerEntry.ref_id.in_(grn_ids)).all() if grn_ids else []
+        bills = db.query(models.VendorLedgerEntry).filter(
+            models.VendorLedgerEntry.ref_type == "GRN_BILL", models.VendorLedgerEntry.ref_id.in_(grn_ids)).all() if grn_ids else []
+        blockers = []
+
+        # ---- decide the new quantity + rate of every receiving line ----
+        plan = {}   # grn line id -> (new_qty, new_rate)
+        if "@" in rest:
+            pool = list(grn_lines)
+            for old, new_q, r in _parse_lots(rest):
+                hit = next((l for l in pool if abs(l.quantity - old) < 1e-6), None)
+                if hit is None:
+                    blockers.append(f"no receiving with quantity {old:g} is left to match '{old:g}@{r:g}'")
+                    continue
+                pool.remove(hit)
+                plan[hit.id] = (new_q, r)
+            for l in pool:
+                blockers.append(f"receiving {grn_no[l.grn_id]} (batch {l.batch_no}, qty {l.quantity:g}) is not in the list you gave")
+        else:
+            rate_all = float(rest)
+            if rate_all <= 0:
+                print("[purge] PO_RATE_FIX: rate must be above zero — nothing to do")
+                return
+            plan = {l.id: (l.quantity, rate_all) for l in grn_lines}
+
+        print(f"[purge] {'DRY RUN — ' if dry else ''}correct {po_number} (id {po.id}, status {po.status.value}, gst {gst:g}%): "
+              f"{len(grns)} receivings, PO line(s) qty/rate {[(l.quantity, l.rate, l.received_quantity) for l in po.lines]}")
+        backup = {"po_lines": [(l.id, l.quantity, l.rate, l.received_quantity) for l in po.lines], "po_status": po.status.value,
+                  "grn_lines": [(l.id, l.quantity, l.rate) for l in grn_lines],
+                  "stock_in": [(e.id, e.quantity, e.rate) for e in stock_in], "bills": [(b.id, b.amount) for b in bills],
+                  "production": []}
+        changes = []   # (obj, attr, new)
+        batch_rate = {}    # (item, warehouse, batch) -> new rate
+        grn_total = {}
+        recv_q, recv_v = {}, {}   # per po_line_id
+        for l in grn_lines:
+            if l.id not in plan:
+                continue
+            nq, nr = plan[l.id]
+            print(f"[purge]   {grn_no[l.grn_id]} batch {l.batch_no}: {l.quantity:g} @ {l.rate:g} -> {nq:g} @ {nr:g} = {nq * nr:,.2f}")
+            changes += [(l, "quantity", nq), (l, "rate", nr)]
+            batch_rate[(l.item_id, l.warehouse_id, l.batch_no)] = nr
+            grn_total[l.grn_id] = grn_total.get(l.grn_id, 0.0) + nq * nr
+            recv_q[l.po_line_id] = recv_q.get(l.po_line_id, 0.0) + nq
+            recv_v[l.po_line_id] = recv_v.get(l.po_line_id, 0.0) + nq * nr
+            for e in stock_in:
+                if e.ref_id == l.grn_id and e.batch_no == l.batch_no and e.item_id == l.item_id:
+                    changes += [(e, "quantity", nq), (e, "rate", nr)]
+            if nq < l.quantity - 1e-9:
+                net = sum(x.quantity for x in db.query(models.StockLedgerEntry).filter(
+                    models.StockLedgerEntry.item_id == l.item_id, models.StockLedgerEntry.warehouse_id == l.warehouse_id,
+                    models.StockLedgerEntry.batch_no == l.batch_no).all())
+                if net + (nq - l.quantity) < -1e-6:
+                    blockers.append(f"batch {l.batch_no} has only {net:g} left, so it can't be reduced by {l.quantity - nq:g}")
+        for b in bills:
+            new_amt = round(grn_total.get(b.ref_id, 0.0) * (1 + gst / 100.0), 2)
+            changes.append((b, "amount", new_amt))
+        print(f"[purge]   vendor bills total: {sum(b.amount for b in bills):,.2f} -> "
+              f"{sum(round(grn_total.get(b.ref_id, 0.0) * (1 + gst / 100.0), 2) for b in bills):,.2f}  (GST {gst:g}% included)")
+
+        # ---- PO line: received quantity, average rate; close-out ordered quantity if it was completed ----
+        for l in po.lines:
+            rq = recv_q.get(l.id)
+            if rq is None:
+                continue
+            avg = recv_v[l.id] / rq if rq else l.rate
+            new_ordered = rq if po.status == models.POStatus.completed else max(l.quantity, rq)
+            print(f"[purge]   PO line: ordered {l.quantity:g} -> {new_ordered:g}, received {l.received_quantity:g} -> {rq:g}, "
+                  f"average rate {l.rate:g} -> {avg:.6f}")
+            changes += [(l, "received_quantity", rq), (l, "quantity", new_ordered), (l, "rate", avg)]
+            if new_ordered - rq <= 1e-6:
+                changes.append((po, "status", models.POStatus.completed))
+            else:
+                changes.append((po, "status", models.POStatus.partially_received))
+
+        # ---- production orders that consumed this stock ----
+        batch_keys = set(batch_rate)
+        issues = [e for e in db.query(models.StockLedgerEntry).filter(
+            models.StockLedgerEntry.ref_type == "PRODUCTION_ISSUE").all()
+            if (e.item_id, e.warehouse_id, e.batch_no) in batch_keys]
+        order_ids = sorted({e.ref_id for e in issues})
+        for e in [e for e in db.query(models.StockLedgerEntry).filter(models.StockLedgerEntry.quantity < 0).all()
+                  if (e.item_id, e.warehouse_id, e.batch_no) in batch_keys and e.ref_type != "PRODUCTION_ISSUE"]:
+            blockers.append(f"stock of this PO was also used by {e.ref_type} #{e.ref_id} (batch {e.batch_no}, qty {e.quantity}) — not a production order")
+        for oid in order_ids:
+            order = db.query(models.ProductionOrder).filter(models.ProductionOrder.id == oid).first()
+            if order is None or order.customer_id is not None:
+                blockers.append(f"production order id {oid} is missing or a toll run")
+                continue
+            in_lines = db.query(models.ProductionOrderInputLine).filter(
+                models.ProductionOrderInputLine.production_order_id == oid).all()
+            out_lines = db.query(models.ProductionOrderOutputLine).filter(
+                models.ProductionOrderOutputLine.production_order_id == oid).all()
+            issue_entries = db.query(models.StockLedgerEntry).filter(
+                models.StockLedgerEntry.ref_type == "PRODUCTION_ISSUE", models.StockLedgerEntry.ref_id == oid).all()
+            receipts = db.query(models.StockLedgerEntry).filter(
+                models.StockLedgerEntry.ref_type == "PRODUCTION_RECEIPT", models.StockLedgerEntry.ref_id == oid).all()
+            new_in_rate = lambda il: batch_rate.get((il.item_id, il.warehouse_id, il.batch_no), il.rate)
+            old_cost = order.total_input_cost or 0.0
+            new_cost = sum(il.quantity * new_in_rate(il) for il in in_lines if not il.is_toll_stock)
+            by_value = sum(ol.quantity * ol.rate for ol in out_lines if not ol.is_primary and not ol.is_loss)
+            prim_qty = sum(ol.quantity for ol in out_lines if ol.is_primary)
+            if prim_qty <= 0 or new_cost - by_value < 0:
+                blockers.append(f"production order {order.order_number}: new cost would not cover byproduct value")
+                continue
+            new_unit = (new_cost - by_value) / prim_qty
+            old_unit = next((ol.rate for ol in out_lines if ol.is_primary), None)
+            print(f"[purge]   production {order.order_number} (id {oid}): input cost {old_cost:,.2f} -> {new_cost:,.2f}; "
+                  f"primary unit cost {old_unit} -> {new_unit:,.4f}; outputs {[(ol.item_id, ol.batch_no, ol.quantity) for ol in out_lines]}")
+            backup["production"].append({"order_id": oid, "total_input_cost": old_cost,
+                                         "input_lines": [(il.id, il.rate) for il in in_lines],
+                                         "issues": [(e.id, e.rate) for e in issue_entries],
+                                         "output_lines": [(ol.id, ol.rate) for ol in out_lines],
+                                         "receipts": [(e.id, e.rate) for e in receipts]})
+            for il in in_lines:
+                changes.append((il, "rate", new_in_rate(il)))
+            for e in issue_entries:
+                key = (e.item_id, e.warehouse_id, e.batch_no)
+                if key in batch_rate:
+                    changes.append((e, "rate", batch_rate[key]))
+            changes.append((order, "total_input_cost", new_cost))
+            out_keys = set()
+            for ol in out_lines:
+                if ol.is_primary:
+                    changes.append((ol, "rate", new_unit))
+                    out_keys.add((ol.item_id, ol.warehouse_id, ol.batch_no))
+            for e in receipts:
+                if (e.item_id, e.warehouse_id, e.batch_no) in out_keys:
+                    changes.append((e, "rate", new_unit))
+            for e in db.query(models.StockLedgerEntry).filter(models.StockLedgerEntry.ref_type != "PRODUCTION_RECEIPT").all():
+                if (e.item_id, e.warehouse_id, e.batch_no) in out_keys:
+                    blockers.append(f"output of {order.order_number} (batch {e.batch_no}) was used again: {e.ref_type} #{e.ref_id} qty {e.quantity}")
+        if blockers:
+            print("[purge]   ABORTED — nothing changed, because:")
+            for x in sorted(set(blockers)):
+                print(f"[purge]     {x}")
+            return
+        paid = sum(e.amount for e in db.query(models.VendorLedgerEntry).filter(
+            models.VendorLedgerEntry.ref_type.in_(("PO_ADVANCE", "PO_PAYMENT")), models.VendorLedgerEntry.ref_id == po.id).all())
+        print(f"[purge]   payments recorded on this PO stay as they are: Rs. {paid:,.2f}")
+        if dry:
+            print("[purge]   dry run only — nothing changed. Set PURGE_PO_DRY_RUN=0 to apply.")
+            return
+        folder = pathlib.Path(file_storage.UPLOADS_DIR) / "purge_backups"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"ratefix_{po_number}_{datetime.datetime.utcnow():%Y%m%d_%H%M%S}.json"
+        path.write_text(json.dumps(backup, indent=2, default=str))
+        print(f"[purge]   backup written: {path}")
+        for obj, attr, val in changes:
+            setattr(obj, attr, val)
+        db.commit()
+        print(f"[purge]   DONE — {po_number} corrected.")
+    except Exception as e:
+        db.rollback()
+        print(f"[purge]   FAILED, nothing changed: {e}")
+    finally:
+        db.close()
+
+
 def run():
+    correct_po_rate()
     purge_sales_invoices()
     relink_batches()
     purge_orphan_payments()

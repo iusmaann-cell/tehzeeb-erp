@@ -150,7 +150,56 @@ def relink_batches():
         db.close()
 
 
+def purge_sales_invoices():
+    """PURGE_SALES_INVOICES=<number>,<number>: remove UNPAID sales invoices and what they posted to the
+    distributor's ledger. Refuses any invoice that has a payment. Dry run unless PURGE_PO_DRY_RUN=0."""
+    numbers = [n.strip() for n in (os.getenv("PURGE_SALES_INVOICES") or "").split(",") if n.strip()]
+    if not numbers:
+        return
+    dry = os.getenv("PURGE_PO_DRY_RUN", "1") != "0"
+    db = SessionLocal()
+    try:
+        todo = []
+        for number in numbers:
+            inv = db.query(models.SalesInvoice).filter(models.SalesInvoice.invoice_number == number).first()
+            if not inv:
+                print(f"[purge] invoice {number}: not found — nothing to do (already removed?)")
+                continue
+            ledger = db.query(models.DistributorLedgerEntry).filter(
+                models.DistributorLedgerEntry.ref_type.in_(("SALES_INVOICE", "SALES_PAYMENT")),
+                models.DistributorLedgerEntry.ref_id == inv.id).all()
+            paid = inv.payment_status == models.PaymentStatus.paid or any(e.ref_type == "SALES_PAYMENT" for e in ledger)
+            print(f"[purge] {'DRY RUN — ' if dry else ''}invoice {number} (id {inv.id}) distributor {inv.distributor_id} "
+                  f"date {str(inv.invoice_date)[:10]} total {inv.total_amount:,.2f} status {inv.payment_status.value} "
+                  f"lines {len(inv.lines)} ledger entries {[(e.ref_type, e.amount) for e in ledger]}")
+            if paid:
+                print(f"[purge]   SKIPPED — {number} has a payment recorded; mark it unpaid first")
+                continue
+            todo.append((inv, ledger))
+        if dry or not todo:
+            print("[purge]   dry run only — nothing deleted." if dry else "[purge]   nothing to delete.")
+            return
+        backup = [{"invoice": _row(i), "lines": [_row(l) for l in i.lines], "ledger": [_row(e) for e in led]} for i, led in todo]
+        folder = pathlib.Path(file_storage.UPLOADS_DIR) / "purge_backups"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"sales_invoices_{datetime.datetime.utcnow():%Y%m%d_%H%M%S}.json"
+        path.write_text(json.dumps(backup, indent=2, default=str))
+        print(f"[purge]   backup written: {path}")
+        for inv, led in todo:
+            for e in led:
+                db.delete(e)
+            db.delete(inv)
+        db.commit()
+        print(f"[purge]   DONE — removed {[i.invoice_number for i, _ in todo]}.")
+    except Exception as e:
+        db.rollback()
+        print(f"[purge]   FAILED, nothing changed: {e}")
+    finally:
+        db.close()
+
+
 def run():
+    purge_sales_invoices()
     relink_batches()
     purge_orphan_payments()
     po_number = (os.getenv("PURGE_PO_NUMBER") or "").strip()

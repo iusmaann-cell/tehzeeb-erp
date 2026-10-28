@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from typing import List
 from .. import models, schemas
 from ..database import get_db
+from ..security import require_action
 
 router = APIRouter(tags=["Sales & Distribution"])
 
@@ -408,3 +409,25 @@ def update_sales_invoice_payment_status(invoice_id: int, update: schemas.Payment
     db.commit()
     db.refresh(invoice)
     return invoice
+
+
+@router.delete("/sales-invoices/{invoice_id}", dependencies=[Depends(require_action("delete_sales_invoices"))])
+def delete_sales_invoice(invoice_id: int, db: Session = Depends(get_db)):
+    """Removes an UNPAID invoice and the amount it posted to the distributor's ledger. Paid invoices must be
+    marked unpaid first (which reverses their payment entries). Stock is not touched — dispatches are separate."""
+    invoice = db.query(models.SalesInvoice).filter(models.SalesInvoice.id == invoice_id).first()
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Sales invoice not found")
+    payments = db.query(models.DistributorLedgerEntry).filter(
+        models.DistributorLedgerEntry.ref_type == "SALES_PAYMENT",
+        models.DistributorLedgerEntry.ref_id == invoice.id).count()
+    if invoice.payment_status == models.PaymentStatus.paid or payments:
+        raise HTTPException(status_code=400, detail="This invoice has a payment recorded. Mark it unpaid first, then delete it.")
+    for entry in db.query(models.DistributorLedgerEntry).filter(
+            models.DistributorLedgerEntry.ref_type == "SALES_INVOICE",
+            models.DistributorLedgerEntry.ref_id == invoice.id).all():
+        db.delete(entry)
+    number = invoice.invoice_number
+    db.delete(invoice)   # its lines go with it
+    db.commit()
+    return {"message": f"Invoice {number} deleted", "invoice_id": invoice_id}

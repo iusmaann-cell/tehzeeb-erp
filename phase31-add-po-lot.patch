@@ -1,0 +1,107 @@
+--- a/backend/app/one_time_cleanup.py
++++ b/backend/app/one_time_cleanup.py
+@@ -456,8 +456,94 @@
+         db.close()
+ 
+ 
++def add_po_lot():
++    """PO_ADD_LOT="<PO number>=<qty>@<rate>[,<qty>@<rate>...]"  adds new receiving(s) (GRN + stock-in + vendor bill)
++    to an existing PO, same item/warehouse as its latest receiving. The PO line's ordered/received quantity grows by the
++    lot and its rate becomes the weighted average. Dry run unless PURGE_PO_DRY_RUN=0."""
++    spec = (os.getenv("PO_ADD_LOT") or "").strip()
++    if not spec or "=" not in spec:
++        return
++    from .routers.grn import _auto_batch_no
++    po_number, _, rest = spec.partition("=")
++    po_number = po_number.strip()
++    dry = os.getenv("PURGE_PO_DRY_RUN", "1") != "0"
++    db = SessionLocal()
++    try:
++        po = db.query(models.PurchaseOrder).filter(models.PurchaseOrder.po_number == po_number).first()
++        if not po:
++            print(f"[purge] {po_number}: not found")
++            return
++        last = db.query(models.GRNLine).join(models.GRN, models.GRN.id == models.GRNLine.grn_id).filter(
++            models.GRN.purchase_order_id == po.id).order_by(models.GRNLine.id.desc()).first()
++        if last is None:
++            print(f"[purge] {po_number}: no receiving to copy item/warehouse from — aborted")
++            return
++        po_line = db.query(models.PurchaseOrderLine).filter(models.PurchaseOrderLine.id == last.po_line_id).first()
++        gst = po.gst_rate or 0.0
++        lots = []
++        for part in rest.split(","):
++            q, _, r = part.strip().partition("@")
++            lots.append((float(q), float(r)))
++        print(f"[purge] {'DRY RUN — ' if dry else ''}add {len(lots)} lot(s) to {po_number} (id {po.id}, status {po.status.value}, gst {gst:g}%), "
++              f"item {last.item_id}, warehouse {last.warehouse_id}; PO line now ordered {po_line.quantity:g} / received {po_line.received_quantity:g} @ {po_line.rate:g}")
++        backup = {"po_line": (po_line.id, po_line.quantity, po_line.rate, po_line.received_quantity),
++                  "po_status": po.status.value, "created_grn_numbers": []}
++        tot_q, tot_v = po_line.received_quantity, po_line.received_quantity * po_line.rate
++        now = datetime.datetime.utcnow()
++        for i, (q, r) in enumerate(lots):
++            if q <= 0 or r <= 0:
++                print("[purge]   quantity and rate must be above zero — aborted")
++                return
++            grn_no = f"GRN-{(now + datetime.timedelta(seconds=i)).strftime('%y%m%d-%H%M%S')}"
++            batch = _auto_batch_no(db, last.item_id)
++            amount = round(q * r * (1 + gst / 100.0), 2)
++            print(f"[purge]   {grn_no} batch {batch}: {q:g} @ {r:g} = {q * r:,.2f}; vendor bill {amount:,.2f}")
++            backup["created_grn_numbers"].append(grn_no)
++            tot_q += q
++            tot_v += q * r
++            if dry:
++                continue
++            g = models.GRN(grn_number=grn_no, purchase_order_id=po.id, freight_amount=0.0,
++                           notes="Added lot (correction)", received_date=now)
++            db.add(g)
++            db.flush()
++            db.add(models.GRNLine(grn_id=g.id, po_line_id=po_line.id, item_id=last.item_id,
++                                  warehouse_id=last.warehouse_id, batch_no=batch, quantity=q, rate=r))
++            db.add(models.StockLedgerEntry(item_id=last.item_id, warehouse_id=last.warehouse_id, batch_no=batch,
++                                           quantity=q, rate=r, is_toll_stock=0, ref_type="GRN", ref_id=g.id))
++            db.add(models.VendorLedgerEntry(vendor_id=po.vendor_id, direction=models.LedgerDirection.debit,
++                                            amount=amount, ref_type="GRN_BILL", ref_id=g.id,
++                                            notes=f"Bill for GRN {grn_no}" + (f" (incl. {gst:g}% GST)" if gst else "")))
++            db.flush()
++        new_avg = tot_v / tot_q
++        print(f"[purge]   PO line: ordered {po_line.quantity:g} -> {tot_q:g}, received {po_line.received_quantity:g} -> {tot_q:g}, average rate {po_line.rate:g} -> {new_avg:.6f}")
++        if dry:
++            print("[purge]   dry run only — nothing changed")
++            db.rollback()
++            return
++        po_line.quantity = tot_q
++        po_line.received_quantity = tot_q
++        po_line.rate = new_avg
++        po.status = models.POStatus.completed
++        if po.payment_status == models.PaymentStatus.paid:
++            po.payment_status = models.PaymentStatus.unpaid
++        bdir = pathlib.Path(os.getenv("UPLOADS_DIR", "uploads")) / "purge_backups"
++        bdir.mkdir(parents=True, exist_ok=True)
++        bf = bdir / f"addlot_{po_number}_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
++        bf.write_text(json.dumps(backup, default=str, indent=1))
++        db.commit()
++        print(f"[purge]   backup written: {bf}")
++        print(f"[purge]   DONE — lot(s) added to {po_number}.")
++    except Exception as e:
++        db.rollback()
++        print(f"[purge] add lot FAILED: {e}")
++    finally:
++        db.close()
++
++
+ def run():
+     correct_po_rate()
++    add_po_lot()
+     purge_sales_invoices()
+     relink_batches()
+     purge_orphan_payments()
+--- a/README.md
++++ b/README.md
+@@ -706,3 +706,7 @@
+ ## Phase 30 — PO correction also follows warehouse transfers
+ 
+ Corrected cost now follows stock moved between warehouses/tanks (the IN and OUT ledger lines are re-rated and anything produced or sold from the destination is re-costed). Transfers of a toll customer's stock, and stock adjustments on corrected batches, still stop the correction.
++
++## Phase 31 — add a lot to an existing PO (one-time tool)
++
++`one_time_cleanup.py`: `PO_ADD_LOT="<PO number>=<qty>@<rate>[,<qty>@<rate>...]"` adds new receiving(s) to an existing PO — a new GRN + batch, stock-in entry and vendor bill (GST included), same item/warehouse as the PO's latest receiving. The PO line's ordered/received quantity grows by the lot and its rate becomes the weighted average. Dry run unless `PURGE_PO_DRY_RUN=0`; JSON backup in `purge_backups/` (`addlot_*.json`). Remove the variable afterwards.

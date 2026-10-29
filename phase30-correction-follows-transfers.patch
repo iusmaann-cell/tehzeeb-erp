@@ -1,0 +1,45 @@
+--- a/backend/app/one_time_cleanup.py	2026-10-29 02:08:41.000000000 +0500
++++ b/backend/app/one_time_cleanup.py	2026-10-29 13:05:39.120095110 +0500
+@@ -345,11 +345,33 @@
+                         if abs(changed.get(key, -1.0) - new_unit) > 1e-9:
+                             changed[key] = new_unit
+                             grew = True
++            # stock moved between warehouses keeps its batch number and cost, so the new rate follows it
++            for e in all_entries:
++                if e.ref_type == "STOCK_TRANSFER_OUT" and (e.item_id, e.warehouse_id, e.batch_no) in changed:
++                    if e.is_toll_stock:
++                        blockers.append(f"transfer #{e.ref_id} moved a toll customer's stock of batch {e.batch_no}")
++                        continue
++                    rate = changed[(e.item_id, e.warehouse_id, e.batch_no)]
++                    for t in all_entries:
++                        if t.ref_type == "STOCK_TRANSFER_IN" and t.ref_id == e.ref_id and t.item_id == e.item_id \
++                                and t.batch_no == e.batch_no and abs(t.quantity + e.quantity) < 1e-6:
++                            key_in = (t.item_id, t.warehouse_id, t.batch_no)
++                            if abs(changed.get(key_in, -1.0) - rate) > 1e-9:
++                                changed[key_in] = rate
++                                grew = True
+             if not grew:
+                 break
+         else:
+             blockers.append("the chain of production orders is too long or circular")
+ 
++        moved = [e for e in all_entries if e.ref_type in ("STOCK_TRANSFER_OUT", "STOCK_TRANSFER_IN")
++                 and (e.item_id, e.warehouse_id, e.batch_no) in changed and not e.is_toll_stock]
++        if moved:
++            print(f"[purge]   warehouse transfers affected: {len(moved)} ledger line(s) re-rated")
++            backup["transfers"] = [(e.id, e.rate) for e in moved]
++            for e in moved:
++                changes.append((e, "rate", changed[(e.item_id, e.warehouse_id, e.batch_no)]))
++
+         for oid in sorted(plans):
+             pl = plans[oid]
+             order = pl["order"]
+@@ -398,7 +420,7 @@
+             print(f"[purge]   sales dispatches affected: {len(dispatch_entries)} line(s); cost of goods sold {old_cogs:,.2f} -> {new_cogs:,.2f}")
+             backup["dispatch"] = [(e.id, e.rate) for e in dispatch_entries]
+ 
+-        allowed_out = {"PRODUCTION_ISSUE", "SALES_DISPATCH"}
++        allowed_out = {"PRODUCTION_ISSUE", "SALES_DISPATCH", "STOCK_TRANSFER_OUT", "STOCK_TRANSFER_IN"}
+         for e in all_entries:
+             if (e.item_id, e.warehouse_id, e.batch_no) in changed and e.ref_type not in allowed_out \
+                     and e.ref_type not in ("GRN", "PRODUCTION_RECEIPT") and not (e.ref_type == "GRN" and e.ref_id in grn_ids):

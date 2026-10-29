@@ -676,3 +676,37 @@ Purchase orders that already have goods received cannot be deleted — the serve
 ## Phase 23 — orphan payment cleanup (temporary)
 
 Setting `PURGE_ORPHAN_PO_ID=<id>` (with `PURGE_PO_DRY_RUN`, default dry run) removes advance/payment ledger entries left behind by a purchase order that no longer exists (it refuses if a PO with that id still exists, and backs up first). The expense report now labels such payments "PO #N (deleted)". Remove the variables after use.
+
+## Phase 24 — fix: editing a recipe (BOM) or a sales order failed with "Failed to fetch"
+
+The update endpoints read the order/recipe lines from a plain dict instead of the validated model, so saving an edit that included lines crashed the server (HTTP 500, which the browser reports as "Failed to fetch"). Fixed in `routers/production.py` (recipes) and `routers/sales.py` (sales orders).
+
+## Phase 25 — production order form redesign
+
+The New Production Order panel is wider, and every input/output line is now its own card: the item picker takes the full width (so long item names show in full), with warehouse, quantity and batch underneath, all labelled. Flags (primary / process loss / byproduct rate) sit on their own row.
+
+## Phase 26 — items with stock can't be deleted; relink batches of a deleted item
+
+- `DELETE /items/{id}` is refused while any batch of that item still has stock on hand (owned or toll); the Items page shows why. Such an item can still be edited.
+- `one_time_cleanup.py` can move the stock batches of an already-deleted item onto a (new or existing) active item: set `RELINK_ITEM_NAME` and `RELINK_BATCHES` (comma-separated batch numbers). Dry run by default (`PURGE_PO_DRY_RUN`), set to `0` to apply; refuses if a batch belongs to an active item; JSON backup in `uploads/purge_backups/`. Remove the variables afterwards.
+
+## Phase 27 — delete unpaid sales invoices
+
+Sales Invoices has a **Delete** link on every unpaid invoice (not shown on paid ones). It removes the invoice, its lines and the amount it posted to the distributor's ledger; stock is untouched. The server refuses invoices with a payment (mark unpaid first). New permission **Delete unpaid sales invoices** (Settings → Accounts → Roles; administrators always have it).
+`one_time_cleanup.py` can remove named invoices: `PURGE_SALES_INVOICES=SINV-…,SINV-…` (dry run unless `PURGE_PO_DRY_RUN=0`; backup to `purge_backups/`). Remove the variable afterwards.
+
+## Phase 28 — correct the rate / quantity of each receiving of a purchase order (temporary)
+
+`one_time_cleanup.py`: `PO_RATE_FIX="<PO number>=<rate>"` (one rate for every receiving) or `PO_RATE_FIX="<PO number>=9920@26,8575@26,12425>9750@21,..."` (one `quantity@rate` per receiving, matched by its current quantity; `old>new` also corrects the quantity). Dry run unless `PURGE_PO_DRY_RUN=0`. Keeps the PO, receivings and stock and corrects goods-received lines, stock-in entries, vendor bills (with GST), the PO line (received quantity, average rate; a completed PO's ordered quantity is set to what was received) and the cost of production orders that already used the stock. Payments and freight are untouched. Refuses if a corrected batch would go negative or a production output was used again. JSON backup in `purge_backups/`. Remove the variable afterwards.
+
+## Phase 29 — PO correction follows the cost all the way down
+
+The correction in Phase 28 now also re-costs production orders that used the output of a corrected production order (any depth), and the cost of goods sold on sales dispatches of that stock. It still refuses when the stock was also moved, transferred or adjusted.
+
+## Phase 30 — PO correction also follows warehouse transfers
+
+Corrected cost now follows stock moved between warehouses/tanks (the IN and OUT ledger lines are re-rated and anything produced or sold from the destination is re-costed). Transfers of a toll customer's stock, and stock adjustments on corrected batches, still stop the correction.
+
+## Phase 31 — add a lot to an existing PO (one-time tool)
+
+`one_time_cleanup.py`: `PO_ADD_LOT="<PO number>=<qty>@<rate>[,<qty>@<rate>...]"` adds new receiving(s) to an existing PO — a new GRN + batch, stock-in entry and vendor bill (GST included), same item/warehouse as the PO's latest receiving. The PO line's ordered/received quantity grows by the lot and its rate becomes the weighted average. Dry run unless `PURGE_PO_DRY_RUN=0`; JSON backup in `purge_backups/` (`addlot_*.json`). Remove the variable afterwards.

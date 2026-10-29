@@ -225,6 +225,7 @@ export const api = {
 
   // Sales Invoices
   getSalesInvoices: (distributorId) => request(`/sales-invoices/${distributorId ? `?distributor_id=${distributorId}` : ""}`),
+  deleteSalesInvoice: (id) => request(`/sales-invoices/${id}`, { method: "DELETE" }),
   createSalesInvoice: (data) => request("/sales-invoices/", { method: "POST", body: JSON.stringify(data) }),
 
   // Expenses

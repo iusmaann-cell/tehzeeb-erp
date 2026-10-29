@@ -250,7 +250,7 @@ export function Modal({ title, subtitle, onClose, children, wide = false, footer
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className={`anim-panel bg-surface w-full ${wide ? "md:max-w-[680px]" : "md:max-w-[480px]"}
+        className={`anim-panel bg-surface w-full ${wide === "xl" ? "md:max-w-[min(980px,96vw)]" : wide ? "md:max-w-[680px]" : "md:max-w-[480px]"}
           max-h-[92vh] md:max-h-none md:h-full rounded-t-[28px] md:rounded-t-none md:rounded-l-[32px]
           shadow-frame flex flex-col`}
         onClick={(e) => e.stopPropagation()}

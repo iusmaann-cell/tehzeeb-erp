@@ -56,8 +56,11 @@ def update_bom(bom_id: int, update: schemas.BOMUpdate, db: Session = Depends(get
         raise HTTPException(status_code=404, detail="BOM not found")
 
     data = update.dict(exclude_unset=True)
-    input_lines = data.pop("input_lines", None)
-    output_lines = data.pop("output_lines", None)
+    # take the lines from the model itself (data holds plain dicts, which have no .item_id)
+    input_lines = update.input_lines if "input_lines" in data else None
+    output_lines = update.output_lines if "output_lines" in data else None
+    data.pop("input_lines", None)
+    data.pop("output_lines", None)
 
     for field, value in data.items():
         setattr(bom, field, value)

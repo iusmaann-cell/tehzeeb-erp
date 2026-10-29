@@ -311,63 +311,102 @@ def correct_po_rate():
             else:
                 changes.append((po, "status", models.POStatus.partially_received))
 
-        # ---- production orders that consumed this stock ----
-        batch_keys = set(batch_rate)
-        issues = [e for e in db.query(models.StockLedgerEntry).filter(
-            models.StockLedgerEntry.ref_type == "PRODUCTION_ISSUE").all()
-            if (e.item_id, e.warehouse_id, e.batch_no) in batch_keys]
-        order_ids = sorted({e.ref_id for e in issues})
-        for e in [e for e in db.query(models.StockLedgerEntry).filter(models.StockLedgerEntry.quantity < 0).all()
-                  if (e.item_id, e.warehouse_id, e.batch_no) in batch_keys and e.ref_type != "PRODUCTION_ISSUE"]:
-            blockers.append(f"stock of this PO was also used by {e.ref_type} #{e.ref_id} (batch {e.batch_no}, qty {e.quantity}) — not a production order")
-        for oid in order_ids:
-            order = db.query(models.ProductionOrder).filter(models.ProductionOrder.id == oid).first()
-            if order is None or order.customer_id is not None:
-                blockers.append(f"production order id {oid} is missing or a toll run")
-                continue
-            in_lines = db.query(models.ProductionOrderInputLine).filter(
-                models.ProductionOrderInputLine.production_order_id == oid).all()
-            out_lines = db.query(models.ProductionOrderOutputLine).filter(
-                models.ProductionOrderOutputLine.production_order_id == oid).all()
-            issue_entries = db.query(models.StockLedgerEntry).filter(
-                models.StockLedgerEntry.ref_type == "PRODUCTION_ISSUE", models.StockLedgerEntry.ref_id == oid).all()
-            receipts = db.query(models.StockLedgerEntry).filter(
-                models.StockLedgerEntry.ref_type == "PRODUCTION_RECEIPT", models.StockLedgerEntry.ref_id == oid).all()
-            new_in_rate = lambda il: batch_rate.get((il.item_id, il.warehouse_id, il.batch_no), il.rate)
-            old_cost = order.total_input_cost or 0.0
-            new_cost = sum(il.quantity * new_in_rate(il) for il in in_lines if not il.is_toll_stock)
-            by_value = sum(ol.quantity * ol.rate for ol in out_lines if not ol.is_primary and not ol.is_loss)
-            prim_qty = sum(ol.quantity for ol in out_lines if ol.is_primary)
-            if prim_qty <= 0 or new_cost - by_value < 0:
-                blockers.append(f"production order {order.order_number}: new cost would not cover byproduct value")
-                continue
-            new_unit = (new_cost - by_value) / prim_qty
-            old_unit = next((ol.rate for ol in out_lines if ol.is_primary), None)
-            print(f"[purge]   production {order.order_number} (id {oid}): input cost {old_cost:,.2f} -> {new_cost:,.2f}; "
-                  f"primary unit cost {old_unit} -> {new_unit:,.4f}; outputs {[(ol.item_id, ol.batch_no, ol.quantity) for ol in out_lines]}")
-            backup["production"].append({"order_id": oid, "total_input_cost": old_cost,
-                                         "input_lines": [(il.id, il.rate) for il in in_lines],
+        # ---- everything downstream that used this stock: production orders (and what they made), sales dispatches ----
+        changed = dict(batch_rate)      # (item, warehouse, batch) -> corrected cost rate
+        plans = {}                      # production order id -> plan
+        all_entries = db.query(models.StockLedgerEntry).all()
+        for _pass in range(30):
+            touched = sorted({e.ref_id for e in all_entries
+                              if e.ref_type == "PRODUCTION_ISSUE" and (e.item_id, e.warehouse_id, e.batch_no) in changed})
+            grew = False
+            for oid in touched:
+                order = db.query(models.ProductionOrder).filter(models.ProductionOrder.id == oid).first()
+                if order is None or order.customer_id is not None:
+                    blockers.append(f"production order id {oid} is missing or a toll run")
+                    continue
+                in_lines = db.query(models.ProductionOrderInputLine).filter(
+                    models.ProductionOrderInputLine.production_order_id == oid).all()
+                out_lines = db.query(models.ProductionOrderOutputLine).filter(
+                    models.ProductionOrderOutputLine.production_order_id == oid).all()
+                new_in_rate = lambda il: changed.get((il.item_id, il.warehouse_id, il.batch_no), il.rate)
+                new_cost = sum(il.quantity * new_in_rate(il) for il in in_lines if not il.is_toll_stock)
+                by_value = sum(ol.quantity * ol.rate for ol in out_lines if not ol.is_primary and not ol.is_loss)
+                prim_qty = sum(ol.quantity for ol in out_lines if ol.is_primary)
+                if prim_qty <= 0 or new_cost - by_value < 0:
+                    blockers.append(f"production order {order.order_number}: new cost would not cover byproduct value")
+                    continue
+                new_unit = (new_cost - by_value) / prim_qty
+                plans[oid] = {"order": order, "in_lines": in_lines, "out_lines": out_lines, "new_cost": new_cost,
+                              "new_unit": new_unit, "old_cost": order.total_input_cost or 0.0,
+                              "old_unit": next((ol.rate for ol in out_lines if ol.is_primary), None)}
+                for ol in out_lines:
+                    if ol.is_primary:
+                        key = (ol.item_id, ol.warehouse_id, ol.batch_no)
+                        if abs(changed.get(key, -1.0) - new_unit) > 1e-9:
+                            changed[key] = new_unit
+                            grew = True
+            if not grew:
+                break
+        else:
+            blockers.append("the chain of production orders is too long or circular")
+
+        for oid in sorted(plans):
+            pl = plans[oid]
+            order = pl["order"]
+            print(f"[purge]   production {order.order_number} (id {oid}): input cost {pl['old_cost']:,.2f} -> {pl['new_cost']:,.2f}; "
+                  f"primary unit cost {pl['old_unit']} -> {pl['new_unit']:,.4f}; outputs "
+                  f"{[(ol.item_id, ol.batch_no, ol.quantity) for ol in pl['out_lines']]}")
+            issue_entries = [e for e in all_entries if e.ref_type == "PRODUCTION_ISSUE" and e.ref_id == oid]
+            receipts = [e for e in all_entries if e.ref_type == "PRODUCTION_RECEIPT" and e.ref_id == oid]
+            backup["production"].append({"order_id": oid, "total_input_cost": pl["old_cost"],
+                                         "input_lines": [(il.id, il.rate) for il in pl["in_lines"]],
                                          "issues": [(e.id, e.rate) for e in issue_entries],
-                                         "output_lines": [(ol.id, ol.rate) for ol in out_lines],
+                                         "output_lines": [(ol.id, ol.rate) for ol in pl["out_lines"]],
                                          "receipts": [(e.id, e.rate) for e in receipts]})
-            for il in in_lines:
-                changes.append((il, "rate", new_in_rate(il)))
+            for il in pl["in_lines"]:
+                key = (il.item_id, il.warehouse_id, il.batch_no)
+                if key in changed:
+                    changes.append((il, "rate", changed[key]))
             for e in issue_entries:
                 key = (e.item_id, e.warehouse_id, e.batch_no)
-                if key in batch_rate:
-                    changes.append((e, "rate", batch_rate[key]))
-            changes.append((order, "total_input_cost", new_cost))
+                if key in changed:
+                    changes.append((e, "rate", changed[key]))
+            changes.append((pl["order"], "total_input_cost", pl["new_cost"]))
             out_keys = set()
-            for ol in out_lines:
+            for ol in pl["out_lines"]:
                 if ol.is_primary:
-                    changes.append((ol, "rate", new_unit))
+                    changes.append((ol, "rate", pl["new_unit"]))
                     out_keys.add((ol.item_id, ol.warehouse_id, ol.batch_no))
             for e in receipts:
                 if (e.item_id, e.warehouse_id, e.batch_no) in out_keys:
-                    changes.append((e, "rate", new_unit))
-            for e in db.query(models.StockLedgerEntry).filter(models.StockLedgerEntry.ref_type != "PRODUCTION_RECEIPT").all():
-                if (e.item_id, e.warehouse_id, e.batch_no) in out_keys:
-                    blockers.append(f"output of {order.order_number} (batch {e.batch_no}) was used again: {e.ref_type} #{e.ref_id} qty {e.quantity}")
+                    changes.append((e, "rate", pl["new_unit"]))
+
+        # sales dispatches that sold corrected stock: cost of goods sold follows the corrected rate
+        dispatch_entries = [e for e in all_entries if e.ref_type == "SALES_DISPATCH"
+                            and (e.item_id, e.warehouse_id, e.batch_no) in changed]
+        if dispatch_entries:
+            d_lines = db.query(models.SalesDispatchLine).all()
+            old_cogs = new_cogs = 0.0
+            for e in dispatch_entries:
+                key = (e.item_id, e.warehouse_id, e.batch_no)
+                changes.append((e, "rate", changed[key]))
+                for dl in d_lines:
+                    if dl.dispatch_id == e.ref_id and (dl.item_id, dl.warehouse_id, dl.batch_no) == key:
+                        old_cogs += dl.quantity * (dl.cogs_rate or 0.0)
+                        new_cogs += dl.quantity * changed[key]
+                        changes.append((dl, "cogs_rate", changed[key]))
+            print(f"[purge]   sales dispatches affected: {len(dispatch_entries)} line(s); cost of goods sold {old_cogs:,.2f} -> {new_cogs:,.2f}")
+            backup["dispatch"] = [(e.id, e.rate) for e in dispatch_entries]
+
+        allowed_out = {"PRODUCTION_ISSUE", "SALES_DISPATCH"}
+        for e in all_entries:
+            if (e.item_id, e.warehouse_id, e.batch_no) in changed and e.ref_type not in allowed_out \
+                    and e.ref_type not in ("GRN", "PRODUCTION_RECEIPT") and not (e.ref_type == "GRN" and e.ref_id in grn_ids):
+                blockers.append(f"batch {e.batch_no} was also touched by {e.ref_type} #{e.ref_id} (qty {e.quantity:g}) — not handled automatically")
+        for e in all_entries:
+            if e.ref_type == "PRODUCTION_RECEIPT" and (e.item_id, e.warehouse_id, e.batch_no) in changed \
+                    and e.ref_id not in plans:
+                blockers.append(f"batch {e.batch_no} comes from production order #{e.ref_id}, which wasn't recalculated")
         if blockers:
             print("[purge]   ABORTED — nothing changed, because:")
             for x in sorted(set(blockers)):

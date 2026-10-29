@@ -69,7 +69,6 @@ ACTIONS = [
     ("approve_stock_adjustments", "Approve stock adjustments"),
     ("edit_purchase_orders", "Edit purchase orders"),
     ("delete_purchase_orders", "Delete purchase orders"),
-    ("delete_sales_invoices", "Delete unpaid sales invoices"),
     ("manage_finalized_payroll", "Reopen or delete finalized payroll runs"),
 ]
 ACTION_KEYS = {a[0] for a in ACTIONS}

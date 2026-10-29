@@ -80,12 +80,8 @@ export default function Items() {
   }
 
   async function handleDelete(id) {
-    try {
-      await api.deleteItem(id);
-      load();
-    } catch (err) {
-      notify(err.message, "error", "Can't delete this item");
-    }
+    await api.deleteItem(id);
+    load();
   }
 
   function startCreateUom() {

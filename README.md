@@ -672,3 +672,7 @@ FBR sales tax return — treat them as an operational dashboard, not filed accou
 `backend/app/one_time_cleanup.py` removes one purchase order completely (its GRNs, the stock they added, and its vendor-ledger entries) **only when** the env var `PURGE_PO_NUMBER` is set. `PURGE_PO_DRY_RUN` defaults to dry-run (prints a "[purge]" report to the deploy logs); set it to `0` to delete. It refuses if the received stock was already used or moved, and writes a JSON backup to `uploads/purge_backups/` first. Remove both variables afterwards (and this file in a later release).
 
 Purchase orders that already have goods received cannot be deleted — the server refuses and the Delete button is hidden; cancel them instead.
+
+## Phase 23 — orphan payment cleanup (temporary)
+
+Setting `PURGE_ORPHAN_PO_ID=<id>` (with `PURGE_PO_DRY_RUN`, default dry run) removes advance/payment ledger entries left behind by a purchase order that no longer exists (it refuses if a PO with that id still exists, and backs up first). The expense report now labels such payments "PO #N (deleted)". Remove the variables after use.

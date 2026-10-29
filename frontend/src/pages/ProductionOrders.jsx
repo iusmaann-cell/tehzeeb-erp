@@ -152,7 +152,7 @@ export default function ProductionOrders() {
       />
 
       {showForm && (
-        <FormPanel wide="xl" title="New Production Order" onClose={() => setShowForm(false)}>
+        <FormPanel wide title="New Production Order" onClose={() => setShowForm(false)}>
           <div className="flex gap-4 text-sm mb-4">
             <label className="flex items-center gap-2">
               <input type="radio" checked={!isToll} onChange={() => { setIsToll(false); setCustomerId(""); }} />
@@ -235,33 +235,26 @@ export default function ProductionOrders() {
                 {isToll && " Defaults to this customer's stock; tick \"our own\" for lines like packaging materials that are yours, not theirs."}
                 {" "}Only set a batch number if you specifically need to draw from one batch (e.g. QC hold on another).
               </div>
-              <div className="space-y-3">
+              <div className="space-y-2">
                 {inputLines.map((line, i) => (
-                  <div key={i} className="rounded-2xl border border-border bg-surface-2/60 p-4">
-                    <div className="flex items-center justify-between mb-3">
-                      <div className="text-xs font-bold uppercase tracking-wide text-forest">Input {i + 1}</div>
-                      <Button type="button" variant="ghost" onClick={() => setInputLines(inputLines.filter((_, idx) => idx !== i))} disabled={inputLines.length === 1}>✕ Remove</Button>
-                    </div>
-                    <div className="space-y-3">
-                      <Select label="Item" value={line.item_id} onChange={(e) => updateInput(i, "item_id", e.target.value)} title={itemLookup[Number(line.item_id)]?.name}>
-                        <option value="">Select item&hellip;</option>
-                        {items.map((it) => <option key={it.id} value={it.id}>{it.name}</option>)}
-                      </Select>
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                        <Select label="Warehouse / tank" value={line.warehouse_id} onChange={(e) => updateInput(i, "warehouse_id", e.target.value)}>
-                          <option value="">Select warehouse&hellip;</option>
-                          {warehouses.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
-                        </Select>
-                        <Input label="Quantity needed" type="number" placeholder="Qty needed" value={line.quantity} onChange={(e) => updateInput(i, "quantity", e.target.value)} />
-                        <Input label="Specific batch (optional)" placeholder="Leave empty for FIFO" value={line.batch_no} onChange={(e) => updateInput(i, "batch_no", e.target.value)} />
-                      </div>
-                      {isToll && (
-                        <label className="flex items-center gap-2 text-sm text-text-muted">
-                          <input type="checkbox" checked={line.use_own_stock} onChange={(e) => updateInput(i, "use_own_stock", e.target.checked)} />
-                          Use our own stock for this line
-                        </label>
-                      )}
-                    </div>
+                  <div key={i} className={`grid ${isToll ? "grid-cols-1 sm:grid-cols-[2fr_1.5fr_1fr_1.3fr_0.9fr_auto]" : "grid-cols-1 sm:grid-cols-[2fr_1.5fr_1fr_1.5fr_auto]"} gap-3 items-center`}>
+                    <Select value={line.item_id} onChange={(e) => updateInput(i, "item_id", e.target.value)}>
+                      <option value="">Item&hellip;</option>
+                      {items.map((it) => <option key={it.id} value={it.id}>{it.name}</option>)}
+                    </Select>
+                    <Select value={line.warehouse_id} onChange={(e) => updateInput(i, "warehouse_id", e.target.value)}>
+                      <option value="">Warehouse&hellip;</option>
+                      {warehouses.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+                    </Select>
+                    <Input type="number" placeholder="Qty needed" value={line.quantity} onChange={(e) => updateInput(i, "quantity", e.target.value)} />
+                    <Input placeholder="Specific batch (optional)" value={line.batch_no} onChange={(e) => updateInput(i, "batch_no", e.target.value)} />
+                    {isToll && (
+                      <label className="flex items-center gap-1.5 text-xs text-text-muted whitespace-nowrap">
+                        <input type="checkbox" checked={line.use_own_stock} onChange={(e) => updateInput(i, "use_own_stock", e.target.checked)} />
+                        our own
+                      </label>
+                    )}
+                    <Button type="button" variant="ghost" onClick={() => setInputLines(inputLines.filter((_, idx) => idx !== i))} disabled={inputLines.length === 1}>✕</Button>
                   </div>
                 ))}
               </div>
@@ -273,54 +266,46 @@ export default function ProductionOrders() {
                 Output produced (new batch created for each line — quantities are pre-filled if you used
                 "Auto-fill from Recipe" above, but you can still adjust any of them before saving)
               </div>
-              <div className="space-y-3">
+              <div className="space-y-2">
                 {outputLines.map((line, i) => {
                   const selectedItem = itemLookup[Number(line.item_id)];
                   return (
-                  <div key={i} className="rounded-2xl border border-border bg-surface-2/60 p-4">
-                    <div className="flex items-center justify-between mb-3">
-                      <div className="text-xs font-bold uppercase tracking-wide text-forest">Output {i + 1}</div>
-                      <Button type="button" variant="ghost" onClick={() => setOutputLines(outputLines.filter((_, idx) => idx !== i))} disabled={outputLines.length === 1}>✕ Remove</Button>
-                    </div>
-                    <div className="space-y-3">
-                      <Select label="Item" value={line.item_id} onChange={(e) => updateOutput(i, "item_id", e.target.value)} title={selectedItem?.name}>
-                        <option value="">Select item&hellip;</option>
-                        {items.map((it) => <option key={it.id} value={it.id}>{it.name}</option>)}
-                      </Select>
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                        <Select label="Warehouse / tank" value={line.warehouse_id} onChange={(e) => updateOutput(i, "warehouse_id", e.target.value)}>
-                          <option value="">Select warehouse&hellip;</option>
-                          {warehouses.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
-                        </Select>
-                        <div>
-                          <Input label="Quantity" type="number" placeholder="Qty" value={line.quantity} onChange={(e) => updateOutput(i, "quantity", e.target.value)} />
-                          {selectedItem?.density_kg_per_liter && line.quantity && (
-                            <div className="text-xs text-text-muted mt-1">
-                              &asymp; {(Number(line.quantity) * selectedItem.density_kg_per_liter).toFixed(1)} kg
-                              at {selectedItem.density_kg_per_liter} kg/L
-                            </div>
-                          )}
+                  <div key={i} className="grid grid-cols-1 sm:grid-cols-[1.5fr_1.5fr_1.3fr_0.8fr_0.8fr_0.8fr_1fr_auto] gap-2 items-center">
+                    <Select value={line.item_id} onChange={(e) => updateOutput(i, "item_id", e.target.value)}>
+                      <option value="">Item&hellip;</option>
+                      {items.map((it) => <option key={it.id} value={it.id}>{it.name}</option>)}
+                    </Select>
+                    <Select value={line.warehouse_id} onChange={(e) => updateOutput(i, "warehouse_id", e.target.value)}>
+                      <option value="">Warehouse&hellip;</option>
+                      {warehouses.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+                    </Select>
+                    <Input placeholder="New batch no." value={line.batch_no} onChange={(e) => updateOutput(i, "batch_no", e.target.value)} />
+                    <div>
+                      <Input type="number" placeholder="Qty" value={line.quantity} onChange={(e) => updateOutput(i, "quantity", e.target.value)} />
+                      {selectedItem?.density_kg_per_liter && line.quantity && (
+                        <div className="text-[10px] text-text-muted mt-0.5">
+                          &asymp; {(Number(line.quantity) * selectedItem.density_kg_per_liter).toFixed(1)} kg
+                          at {selectedItem.density_kg_per_liter} kg/L
                         </div>
-                        <Input label="New batch no." placeholder="New batch no." value={line.batch_no} onChange={(e) => updateOutput(i, "batch_no", e.target.value)} />
-                      </div>
-                      <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
-                        <label className="flex items-center gap-2 text-sm text-text-muted">
-                          <input type="checkbox" checked={line.is_primary} onChange={(e) => updateOutput(i, "is_primary", e.target.checked)} disabled={line.is_loss} />
-                          Primary product
-                        </label>
-                        {!isToll && (
-                          <label className="flex items-center gap-2 text-sm text-text-muted">
-                            <input type="checkbox" checked={!!line.is_loss} onChange={(e) => toggleOutputLoss(i, e.target.checked)} />
-                            Process loss
-                          </label>
-                        )}
-                        {!isToll && !line.is_primary && !line.is_loss && (
-                          <div className="w-full sm:w-56">
-                            <Input label="Byproduct rate (Rs.)" type="number" placeholder="Rate (Rs.)" value={line.rate} onChange={(e) => updateOutput(i, "rate", e.target.value)} />
-                          </div>
-                        )}
-                      </div>
+                      )}
                     </div>
+                    <label className="flex items-center gap-1.5 text-xs text-text-muted">
+                      <input type="checkbox" checked={line.is_primary} onChange={(e) => updateOutput(i, "is_primary", e.target.checked)} disabled={line.is_loss} />
+                      Primary
+                    </label>
+                    {!isToll && (
+                      <label className="flex items-center gap-1.5 text-xs text-text-muted">
+                        <input
+                          type="checkbox" checked={!!line.is_loss}
+                          onChange={(e) => toggleOutputLoss(i, e.target.checked)}
+                        />
+                        Loss
+                      </label>
+                    )}
+                    {!isToll && !line.is_primary && !line.is_loss && (
+                      <Input type="number" placeholder="Rate (Rs.)" value={line.rate} onChange={(e) => updateOutput(i, "rate", e.target.value)} />
+                    )}
+                    <Button type="button" variant="ghost" onClick={() => setOutputLines(outputLines.filter((_, idx) => idx !== i))} disabled={outputLines.length === 1}>✕</Button>
                   </div>
                   );
                 })}

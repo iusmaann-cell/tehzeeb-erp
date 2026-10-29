@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import select, func
+from sqlalchemy import select
 from typing import List
 import io
 import datetime
@@ -445,20 +445,6 @@ def delete_item(item_id: int, db: Session = Depends(get_db)):
     item = db.query(models.Item).filter(models.Item.id == item_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
-    # An item that still has stock on hand (owned or a toll customer's) can be edited but not removed.
-    on_hand = db.query(func.coalesce(func.sum(models.StockLedgerEntry.quantity), 0.0)).filter(
-        models.StockLedgerEntry.item_id == item_id).scalar() or 0.0
-    batches = db.query(models.StockLedgerEntry.warehouse_id, models.StockLedgerEntry.batch_no,
-                       models.StockLedgerEntry.toll_customer_id, func.sum(models.StockLedgerEntry.quantity)).filter(
-        models.StockLedgerEntry.item_id == item_id).group_by(
-        models.StockLedgerEntry.warehouse_id, models.StockLedgerEntry.batch_no,
-        models.StockLedgerEntry.toll_customer_id).all()
-    if any(round(b[3] or 0.0, 6) > 0 for b in batches):
-        raise HTTPException(
-            status_code=400,
-            detail=f"{item.name} still has stock on hand ({on_hand:,.2f}), so it can't be deleted. "
-                   "You can edit the item instead. Use the item once its stock is used up or adjusted to zero.",
-        )
     if item.is_active:
         item.code = f"{item.code}__deleted_{item.id}_{int(datetime.datetime.utcnow().timestamp())}"
     item.is_active = 0

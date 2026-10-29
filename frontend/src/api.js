@@ -225,7 +225,6 @@ export const api = {
 
   // Sales Invoices
   getSalesInvoices: (distributorId) => request(`/sales-invoices/${distributorId ? `?distributor_id=${distributorId}` : ""}`),
-  deleteSalesInvoice: (id) => request(`/sales-invoices/${id}`, { method: "DELETE" }),
   createSalesInvoice: (data) => request("/sales-invoices/", { method: "POST", body: JSON.stringify(data) }),
 
   // Expenses
@@ -388,8 +387,6 @@ export const api = {
 
   // Admin
   resetAllData: () => request("/admin/reset-all-data?confirm=RESET", { method: "POST" }),
-  getOrphanPayments: () => request("/admin/orphan-payments"),
-  purgeOrphanPayments: (entry_ids) => request("/admin/orphan-payments/purge", { method: "POST", body: JSON.stringify({ entry_ids }) }),
 };
 
 // Dates on screen and in the Excel reports follow Pakistan time (UTC+5); the

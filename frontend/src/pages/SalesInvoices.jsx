@@ -1,18 +1,15 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { generateDocNumber } from "../docNumbers";
-import { Card, SectionTitle, Button, Input, Select, Table, Badge, formatPKR, FormPanel, confirmDialog, notify } from "../components/ui";
+import { Card, SectionTitle, Button, Input, Select, Table, Badge, formatPKR, FormPanel, confirmDialog } from "../components/ui";
 import PaymentStatusModal from "../components/PaymentStatusModal";
 import { printInvoice } from "../printInvoice";
-import { useAuth } from "../auth";
 
 const PAYMENT_TONES = { paid: "green", unpaid: "red" };
 
 function emptyLine() { return { item_id: "", quantity: "", rate: "" }; }
 
 export default function SalesInvoices() {
-  const { canDo } = useAuth();
-  const canDelete = canDo("delete_sales_invoices");
   const [invoices, setInvoices] = useState([]);
   const [distributors, setDistributors] = useState([]);
   const [items, setItems] = useState([]);
@@ -39,17 +36,6 @@ export default function SalesInvoices() {
   }
   useEffect(() => { load(); }, []);
   useEffect(() => { api.getInvoiceSettings().then(setInvoiceSettings); }, []);
-
-  async function handleDelete(invoice) {
-    if (!(await confirmDialog(`Delete invoice ${invoice.invoice_number} (Rs. ${formatPKR(invoice.total_amount)})? It is removed from the distributor's ledger. This can't be undone.`, { title: "Delete invoice?", confirmLabel: "Yes, delete" }))) return;
-    try {
-      await api.deleteSalesInvoice(invoice.id);
-      notify(`${invoice.invoice_number} deleted`, "success");
-      load();
-    } catch (err) {
-      notify(err.message, "error", "Can't delete this invoice");
-    }
-  }
 
   async function markUnpaid(invoice) {
     if (!(await confirmDialog(`Mark ${invoice.invoice_number} as unpaid? This reverses the recorded payment in the distributor's ledger.`, { danger: false }))) return;
@@ -216,14 +202,7 @@ export default function SalesInvoices() {
             },
             {
               key: "print", label: "",
-              render: (row) => (
-                <div className="flex items-center gap-4">
-                  <button type="button" className="text-xs text-amber-soft hover:underline" onClick={() => handlePrint(row)}>Print</button>
-                  {canDelete && row.payment_status !== "paid" && (
-                    <button type="button" className="text-xs text-red hover:underline" onClick={() => handleDelete(row)}>Delete</button>
-                  )}
-                </div>
-              ),
+              render: (row) => <button type="button" className="text-xs text-amber-soft hover:underline" onClick={() => handlePrint(row)}>Print</button>,
             },
           ]}
           rows={invoices}

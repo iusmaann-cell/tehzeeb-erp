@@ -53,6 +53,13 @@ export default function ProductionOrders() {
   useEffect(() => { load(); }, []);
 
   const itemLookup = Object.fromEntries(items.map((i) => [i.id, i]));
+  // Output item name(s) of an order: the primary output(s), else any non-loss output.
+  const outputNames = (row) => {
+    const lines = row.output_lines || [];
+    const pick = lines.filter((l) => l.is_primary);
+    const src = pick.length ? pick : lines.filter((l) => !l.is_loss);
+    return [...new Set(src.map((l) => itemLookup[l.item_id]?.name).filter(Boolean))].join(", ");
+  };
   const customerLookup = Object.fromEntries(customers.map((c) => [c.id, c.name]));
 
   function updateInput(i, field, value) {
@@ -134,6 +141,7 @@ export default function ProductionOrders() {
     const q = search.trim().toLowerCase();
     const matchesSearch = !q
       || row.order_number.toLowerCase().includes(q)
+      || outputNames(row).toLowerCase().includes(q)
       || new Date(row.order_date).toLocaleDateString().toLowerCase().includes(q);
     const matchesPlant = plantFilter === "all" || row.plant === plantFilter;
     const matchesType = typeFilter === "all" || (typeFilter === "toll" ? !!row.customer_id : !row.customer_id);
@@ -342,7 +350,7 @@ export default function ProductionOrders() {
       )}
 
       <div className="flex flex-wrap gap-3 mb-4 items-end">
-        <Input label="Search" placeholder="Order # or date…" value={search} onChange={(e) => setSearch(e.target.value)} className="max-w-xs" />
+        <Input label="Search" placeholder="Order #, output item or date…" value={search} onChange={(e) => setSearch(e.target.value)} className="max-w-xs" />
         <Select label="Plant" value={plantFilter} onChange={(e) => setPlantFilter(e.target.value)} className="max-w-xs">
           <option value="all">All plants</option>
           {PLANTS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
@@ -365,7 +373,15 @@ export default function ProductionOrders() {
         <Table
           emptyLabel={orders.length === 0 ? "No production orders yet." : "No production orders match your search/filter."}
           columns={[
-            { key: "order_number", label: "Order #", mono: true },
+            {
+              key: "order_number", label: "Order #",
+              render: (row) => (
+                <div>
+                  <div className="font-mono">{row.order_number}</div>
+                  <div className="text-xs text-text-muted font-sans">{outputNames(row) || "—"}</div>
+                </div>
+              ),
+            },
             { key: "plant", label: "Plant", render: (row) => <Badge tone="amber">{row.plant}</Badge> },
             {
               key: "type",

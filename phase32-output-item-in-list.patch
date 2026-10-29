@@ -1,0 +1,60 @@
+--- a/frontend/src/pages/ProductionOrders.jsx
++++ b/frontend/src/pages/ProductionOrders.jsx
+@@ -53,6 +53,13 @@
+   useEffect(() => { load(); }, []);
+ 
+   const itemLookup = Object.fromEntries(items.map((i) => [i.id, i]));
++  // Output item name(s) of an order: the primary output(s), else any non-loss output.
++  const outputNames = (row) => {
++    const lines = row.output_lines || [];
++    const pick = lines.filter((l) => l.is_primary);
++    const src = pick.length ? pick : lines.filter((l) => !l.is_loss);
++    return [...new Set(src.map((l) => itemLookup[l.item_id]?.name).filter(Boolean))].join(", ");
++  };
+   const customerLookup = Object.fromEntries(customers.map((c) => [c.id, c.name]));
+ 
+   function updateInput(i, field, value) {
+@@ -134,6 +141,7 @@
+     const q = search.trim().toLowerCase();
+     const matchesSearch = !q
+       || row.order_number.toLowerCase().includes(q)
++      || outputNames(row).toLowerCase().includes(q)
+       || new Date(row.order_date).toLocaleDateString().toLowerCase().includes(q);
+     const matchesPlant = plantFilter === "all" || row.plant === plantFilter;
+     const matchesType = typeFilter === "all" || (typeFilter === "toll" ? !!row.customer_id : !row.customer_id);
+@@ -342,7 +350,7 @@
+       )}
+ 
+       <div className="flex flex-wrap gap-3 mb-4 items-end">
+-        <Input label="Search" placeholder="Order # or date…" value={search} onChange={(e) => setSearch(e.target.value)} className="max-w-xs" />
++        <Input label="Search" placeholder="Order #, output item or date…" value={search} onChange={(e) => setSearch(e.target.value)} className="max-w-xs" />
+         <Select label="Plant" value={plantFilter} onChange={(e) => setPlantFilter(e.target.value)} className="max-w-xs">
+           <option value="all">All plants</option>
+           {PLANTS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+@@ -365,7 +373,15 @@
+         <Table
+           emptyLabel={orders.length === 0 ? "No production orders yet." : "No production orders match your search/filter."}
+           columns={[
+-            { key: "order_number", label: "Order #", mono: true },
++            {
++              key: "order_number", label: "Order #",
++              render: (row) => (
++                <div>
++                  <div className="font-mono">{row.order_number}</div>
++                  <div className="text-xs text-text-muted font-sans">{outputNames(row) || "—"}</div>
++                </div>
++              ),
++            },
+             { key: "plant", label: "Plant", render: (row) => <Badge tone="amber">{row.plant}</Badge> },
+             {
+               key: "type",
+--- a/README.md
++++ b/README.md
+@@ -710,3 +710,7 @@
+ ## Phase 31 — add a lot to an existing PO (one-time tool)
+ 
+ `one_time_cleanup.py`: `PO_ADD_LOT="<PO number>=<qty>@<rate>[,<qty>@<rate>...]"` adds new receiving(s) to an existing PO — a new GRN + batch, stock-in entry and vendor bill (GST included), same item/warehouse as the PO's latest receiving. The PO line's ordered/received quantity grows by the lot and its rate becomes the weighted average. Dry run unless `PURGE_PO_DRY_RUN=0`; JSON backup in `purge_backups/` (`addlot_*.json`). Remove the variable afterwards.
++
++## Phase 32 — output item shown in the production order list
++
++`ProductionOrders.jsx`: the Order # column now shows the output item name (primary output; any non-loss output if none is primary) under the order number, and the search box also matches the output item name. Frontend only.

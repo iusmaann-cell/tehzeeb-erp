@@ -710,3 +710,7 @@ Corrected cost now follows stock moved between warehouses/tanks (the IN and OUT 
 ## Phase 31 — add a lot to an existing PO (one-time tool)
 
 `one_time_cleanup.py`: `PO_ADD_LOT="<PO number>=<qty>@<rate>[,<qty>@<rate>...]"` adds new receiving(s) to an existing PO — a new GRN + batch, stock-in entry and vendor bill (GST included), same item/warehouse as the PO's latest receiving. The PO line's ordered/received quantity grows by the lot and its rate becomes the weighted average. Dry run unless `PURGE_PO_DRY_RUN=0`; JSON backup in `purge_backups/` (`addlot_*.json`). Remove the variable afterwards.
+
+## Phase 32 — output item shown in the production order list
+
+`ProductionOrders.jsx`: the Order # column now shows the output item name (primary output; any non-loss output if none is primary) under the order number, and the search box also matches the output item name. Frontend only.
